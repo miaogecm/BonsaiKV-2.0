@@ -12,6 +12,7 @@
 #include <pthread.h>
 
 #include "list.h"
+#include "perf.h"
 #include "rpm.h"
 
 #define NR_MRS_MAX    32

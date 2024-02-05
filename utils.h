@@ -92,6 +92,8 @@ extern int debug_level;
 
 #define __packed            __attribute__((packed))
 
+#define ARRAY_LEN(arr)      (sizeof(arr) / sizeof((arr)[0]))
+
 static inline void __read_once_size(const volatile void *p, void *res, int size) {
     switch (size) {
         case 1: *(uint8_t *)res = *(volatile uint8_t *)p; break;
