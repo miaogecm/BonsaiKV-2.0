@@ -90,13 +90,10 @@ void index_destroy(index_t *index) {
     delete static_cast<mt_index *>(index);
 }
 
-int index_insert(index_t *index, const char *key, size_t key_len, void *val) {
+int index_upsert(index_t *index, const char *key, size_t key_len, void *val) {
     auto *mti = static_cast<mt_index *>(index);
     cursor_type lp(mti->tab, key, (int) key_len);
-    if (unlikely(lp.find_insert(*ti))) {
-        lp.finish(0, *ti);
-        return -EEXIST;
-    }
+    lp.find_insert(*ti);
     lp.value() = val;
     fence();
     lp.finish(1, *ti);
