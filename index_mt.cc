@@ -42,7 +42,7 @@ using internode_type = Masstree::internode<table_params>;
 
 using node_type = Masstree::node_base<table_params>;
 
-static int thread_id = 0;
+static std::atomic<int> thread_id(0);
 static __thread table_params::threadinfo_type *ti = nullptr;
 
 struct mt_index {
@@ -71,7 +71,7 @@ extern "C" {
 index_t *index_create() {
     auto *mti = new mt_index;
     bonsai_assert(!ti);
-    int cur = FAA(thread_id, 1);
+    int cur = thread_id++;
     ti = threadinfo::make(threadinfo::TI_MAIN, cur);
     mti->tab.initialize(*ti);
     return mti;
@@ -81,7 +81,7 @@ void index_thread_init(index_t *index) {
     if (ti) {
         return;
     }
-    int cur = FAA(thread_id, 1);
+    int cur = thread_id++;
     ti = threadinfo::make(threadinfo::TI_PROCESS, cur);
     pr_debug(10, "masstree index thread init (thread id: %d)", cur);
 }

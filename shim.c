@@ -7,6 +7,7 @@
  */
 
 #include "shim.h"
+#include "lock.h"
 
 struct shim {
 

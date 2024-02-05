@@ -79,14 +79,16 @@ extern int debug_level;
 #define DIV_ROUND_UP(n, d)      (((n) + (d) - 1) / (d))
 
 #define PAGE_SIZE       4096
-#define CAS(x, old, new)    __sync_bool_compare_and_swap(&(x), (old), (new))
-#define FAA(x, v)           __sync_fetch_and_add(&(x), (v))
 
 #define cpu_relax()         asm volatile("pause\n": : :"memory")
 
 #define CACHELINE_SIZE      64
 
 #define barrier()           asm volatile("" ::: "memory")
+
+#define smp_rmb()       barrier()
+#define smp_wmb()       barrier()
+#define smp_mb()        asm volatile("lock; addl $0,-4(%%rsp)" ::: "memory", "cc")
 
 #ifndef __cplusplus
 #define inline              __always_inline
