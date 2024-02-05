@@ -9,6 +9,7 @@
 #ifndef SHIM_H
 #define SHIM_H
 
+#include "index.h"
 #include "perf.h"
 
 struct inode;
@@ -17,7 +18,7 @@ typedef struct shim shim_t;
 typedef struct shim_cli shim_cli_t;
 typedef struct inode inode_t;
 
-shim_t *shim_create();
+shim_t *shim_create(index_t *index);
 void shim_destroy(shim_t *shim);
 
 shim_cli_t *shim_create_cli(shim_t *shim, perf_t *perf);
