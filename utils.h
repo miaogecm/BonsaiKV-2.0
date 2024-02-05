@@ -88,7 +88,9 @@ extern int debug_level;
 
 #define barrier()           asm volatile("" ::: "memory")
 
+#ifndef __cplusplus
 #define inline              __always_inline
+#endif
 
 #define __packed            __attribute__((packed))
 

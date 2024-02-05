@@ -1,5 +1,5 @@
 /*
-* BonsaiKV+: Scaling persistent in-memory key-value store for modern tiered, heterogeneous memory systems
+ * BonsaiKV+: Scaling persistent in-memory key-value store for modern tiered, heterogeneous memory systems
  *
  * BonsaiKV+ Performance Counters
  *
