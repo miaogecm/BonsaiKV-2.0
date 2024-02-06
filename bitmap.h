@@ -57,10 +57,6 @@ typedef unsigned long u64;
 
 #define BITOP_LE_SWIZZLE	((BITS_PER_LONG-1) & ~0x7)
 
-#ifndef min
-#define min(x,y) ((x) < (y) ? x : y)
-#endif
-
 /**
  * ffz - find first zero bit in word
  * @word: The word to search

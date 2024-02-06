@@ -50,7 +50,7 @@ struct mt_index {
 };
 
 struct scanner {
-    scanner(void * &val) : val(val) { }
+    explicit scanner(void **val) : val(val) { }
 
     template <typename ScanStackElt, typename Key>
     void visit_leaf(const ScanStackElt &iter, const Key &key, threadinfo &) {
@@ -58,12 +58,12 @@ struct scanner {
     }
 
     bool visit_value(const Str key, void *val, threadinfo &) {
-        this->val = val;
+        *this->val = val;
         return false;
     }
 
 private:
-    void * &val;
+    void **val;
 };
 
 extern "C" {
@@ -113,9 +113,9 @@ int index_remove(index_t *index, const char *key, size_t key_len) {
 
 void *index_find_first_ge(index_t *index, const char *key, size_t key_len) {
     auto *mti = static_cast<mt_index *>(index);
-    Str k = Str(key, key_len);
-    void *val;
-    scanner scanner(val);
+    void *val = ERR_PTR(-ENOENT);
+    auto k = Str(key, key_len);
+    scanner scanner(&val);
     mti->tab.scan(k, true, scanner, *ti);
     return val;
 }

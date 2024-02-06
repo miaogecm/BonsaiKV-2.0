@@ -98,6 +98,9 @@ extern int debug_level;
 
 #define ARRAY_LEN(arr)      (sizeof(arr) / sizeof((arr)[0]))
 
+#define max(x, y)           ((x) > (y) ? (x) : (y))
+#define min(x, y)           ((x) < (y) ? (x) : (y))
+
 static inline void __read_once_size(const volatile void *p, void *res, int size) {
     switch (size) {
         case 1: *(uint8_t *)res = *(volatile uint8_t *)p; break;
@@ -147,6 +150,17 @@ void dump_stack();
 
 static inline pid_t current_tid() {
     return syscall(SYS_gettid);
+}
+
+static inline int memncmp(const char *key1, size_t size1, const char *key2, size_t size2) {
+    int ret = memcmp(key1, key2, min(size1, size2));
+    if (ret) {
+        return ret;
+    }
+    if (size1 < size2) {
+        return -1;
+    }
+    return size1 > size2;
 }
 
 #endif //BONSAIKV_UTILS_H
