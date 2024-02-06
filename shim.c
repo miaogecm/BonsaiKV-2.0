@@ -157,7 +157,10 @@ reget:
     return 0;
 }
 
-static inline void isplit(shim_cli_t *shim_cli, inode_t *inode) {
+static inline void i_gc(shim_cli_t *shim_cli, inode_t *inode) {
+}
+
+static inline void i_split(shim_cli_t *shim_cli, inode_t *inode) {
 
 }
 
@@ -212,8 +215,9 @@ int shim_upsert(shim_cli_t *shim_cli, const char *key, size_t key_len, void *log
         pos = find_first_zero_bit(&validmap, INODE_FANOUT);
 
         if (unlikely(pos == INODE_FANOUT)) {
+            /* TODO: add split and gc code */
             /* Inode full, need to split. */
-            isplit(shim_cli, inode);
+            i_split(shim_cli, inode);
 
             validmap = inode->validmap;
             pos = find_first_zero_bit(&validmap, INODE_FANOUT);
