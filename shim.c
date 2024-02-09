@@ -16,7 +16,8 @@
 struct shim {
     index_t *index;
     shim_indexer logi, hnodei, cnodei;
-    void *logi_ctx, *hnodei_ctx, *cnodei_ctx;
+    shim_log_validator log_validator;
+    void *logi_ctx, *log_validator_ctx, *hnodei_ctx, *cnodei_ctx;
 };
 
 struct shim_cli {
@@ -37,8 +38,8 @@ struct inode {
 
     inode_t *next;
 
-    void *hnode;
-    void *cnode;
+    uint64_t hnode;
+    uint64_t cnode;
 
     uint8_t fgprt[INODE_FANOUT];
     uint16_t rfence_len;
@@ -46,7 +47,7 @@ struct inode {
     spinlock_t lock;
     seqcount_t seq;
 
-    void *logs[INODE_FANOUT];
+    uint64_t logs[INODE_FANOUT];
 
     char rfence[];
 };
@@ -67,19 +68,24 @@ out:
     return shim;
 }
 
-void shim_set_logi(shim_t *shim, shim_indexer logi, void *logi_ctx) {
+void shim_set_log_validator(shim_t *shim, shim_log_validator validator, void *priv) {
+    shim->log_validator = validator;
+    shim->log_validator_ctx = priv;
+}
+
+void shim_set_logi(shim_t *shim, shim_indexer logi, void *priv) {
     shim->logi = logi;
-    shim->logi_ctx = logi_ctx;
+    shim->logi_ctx = priv;
 }
 
-void shim_set_hnodei(shim_t *shim, shim_indexer hnodei, void *hnodei_ctx) {
+void shim_set_hnodei(shim_t *shim, shim_indexer hnodei, void *priv) {
     shim->hnodei = hnodei;
-    shim->hnodei_ctx = hnodei_ctx;
+    shim->hnodei_ctx = priv;
 }
 
-void shim_set_cnodei(shim_t *shim, shim_indexer cnodei, void *cnodei_ctx) {
+void shim_set_cnodei(shim_t *shim, shim_indexer cnodei, void *priv) {
     shim->cnodei = cnodei;
-    shim->cnodei_ctx = cnodei_ctx;
+    shim->cnodei_ctx = priv;
 }
 
 void shim_destroy(shim_t *shim) {
