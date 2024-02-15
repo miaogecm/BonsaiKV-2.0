@@ -1,12 +1,10 @@
 /*
  * BonsaiKV+: Scaling persistent in-memory key-value store for modern tiered, heterogeneous memory systems
  *
- * BonsaiKV+ log layer
+ * BonsaiKV+ scalable data layer
  *
  * Hohai University
  */
 
-#ifndef LOG_H
-#define LOG_H
+#include "dset.h"
 
-#endif //LOG_H
