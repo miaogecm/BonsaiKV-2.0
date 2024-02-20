@@ -163,4 +163,63 @@ static inline int memncmp(const char *key1, size_t size1, const char *key2, size
     return size1 > size2;
 }
 
+#define clflush(addr)\
+asm volatile("clflush %0" : "+m" (*(volatile char *)(addr)))
+#define clflushopt(addr)\
+asm volatile(".byte 0x66; clflush %0" : "+m" (*(volatile char *)(addr)))
+#define clwb(addr)\
+asm volatile(".byte 0x66; xsaveopt %0" : "+m" (*(volatile char *)(addr)))
+
+static inline void flush_range(void* buf, uint32_t len) {
+	uint32_t i;
+	len = len + ((unsigned long)(buf) & (CACHELINE_SIZE - 1));
+	for (i = 0; i < len; i += CACHELINE_SIZE) {
+		clwb(buf + i);
+	}
+}
+
+static void memcpy_nt(void *dst, void *src, size_t len) {
+	int i;
+	long long t1, t2, t3, t4;
+	unsigned char *from, *to;
+	size_t remain = len & (CACHELINE_SIZE - 1);
+
+	from = (unsigned char *) src;
+	to = (unsigned char *) dst;
+	i = len / CACHELINE_SIZE;
+
+	for (; i > 0; i--) {
+		__asm__ __volatile__("  mov (%4), %0\n"
+				     "  mov 8(%4), %1\n"
+				     "  mov 16(%4), %2\n"
+				     "  mov 24(%4), %3\n"
+				     "  movnti %0, (%5)\n"
+				     "  movnti %1, 8(%5)\n"
+				     "  movnti %2, 16(%5)\n"
+				     "  movnti %3, 24(%5)\n"
+				     "  mov 32(%4), %0\n"
+				     "  mov 40(%4), %1\n"
+				     "  mov 48(%4), %2\n"
+				     "  mov 56(%4), %3\n"
+				     "  movnti %0, 32(%5)\n"
+				     "  movnti %1, 40(%5)\n"
+				     "  movnti %2, 48(%5)\n"
+				     "  movnti %3, 56(%5)\n"
+                     : "=&r"(t1), "=&r"(t2), "=&r"(t3), "=&r"(t4)
+				     : "r"(from), "r"(to)
+				     : "memory");
+
+		from += CACHELINE_SIZE;
+		to += CACHELINE_SIZE;
+	}
+
+	/*
+	 * Now do the tail of the block:
+	 */
+	if (remain) {
+		memcpy(to, from, remain);
+		flush_range(to, remain);
+	}
+}
+
 #endif //BONSAIKV_UTILS_H

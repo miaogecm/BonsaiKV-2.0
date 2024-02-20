@@ -11,10 +11,11 @@
 
 #include "index.h"
 #include "perf.h"
+#include "k.h"
 
-typedef void *(*shim_indexer)(uint64_t sub_index, const char *key, size_t key_len, void *priv);
+typedef void *(*shim_indexer)(uint64_t sub_index, k_t key, void *priv);
 typedef bool (*shim_log_validator)(void *log, void *priv);
-typedef bool shim_log_scanner(void *log, void *priv);
+typedef int shim_log_scanner(uint64_t log, uint64_t hnode, uint64_t cnode, void *priv);
 
 typedef struct shim shim_t;
 typedef struct shim_cli shim_cli_t;
@@ -30,8 +31,8 @@ void shim_destroy(shim_t *shim);
 shim_cli_t *shim_create_cli(shim_t *shim, perf_t *perf);
 void shim_destroy_cli(shim_cli_t *shim_cli);
 
-int shim_upsert(shim_cli_t *shim_cli, const char *key, size_t key_len, void *log);
-void *shim_lookup(shim_cli_t *shim_cli, const char *key, size_t key_len);
-void shim_scan_logs(shim_cli_t *shim_cli, const char *key, size_t key_len, shim_log_scanner scanner);
+int shim_upsert(shim_cli_t *shim_cli, k_t key, void *log);
+void *shim_lookup(shim_cli_t *shim_cli, k_t key);
+void shim_scan(shim_cli_t *shim_cli, shim_log_scanner scanner, void *priv);
 
 #endif //SHIM_H

@@ -11,6 +11,4 @@
 
 typedef struct kv kv_t;
 
-uint8_t kv_key_fingerprint(const char *key, size_t len);
-
 #endif //KV_H

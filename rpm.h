@@ -1,7 +1,11 @@
 /*
  * BonsaiKV+: Scaling persistent in-memory key-value store for modern tiered, heterogeneous memory systems
  *
- * Remote Persistent Memory
+ * Local Persistent Memory Management
+ *
+ * RPMM provides RPMA (Remote Persistent Memory Area) abstraction. An RPMA is a logically continuous memory
+ * area starting from offset 0. However, it may be physically interleaved across multiple NVMM devices in
+ * a single memory node.
  *
  * Hohai University
  */
@@ -15,56 +19,46 @@
 #include "utils.h"
 #include "perf.h"
 
-/*
- * Pool = MN1 + MN2 + ... + MNk
- *      = (MR11 + MR12 + ...) + (MR21 + MR22 + ...) + ... + (MRk1 + MRk2 + ...)
- * MR = BaseMR(start, size) | InterleavedMR(MR1, MR2, ..., MRn, strip_size)
- */
+/* Remote */
 
-/* Remote memory node */
+typedef struct rpma_svr rpma_svr_t;
 
-typedef struct rpm_mn rpm_mn_t;
+rpma_svr_t *rpma_svr_create(int port, int nr_devs, const char *dev_paths[], size_t strip_size);
+void rpma_svr_destroy(rpma_svr_t *svr);
 
-rpm_mn_t *rpm_create_mn(int port);
-int rpm_create_base_mr(rpm_mn_t *mn, int mr_id, void *start, size_t size);
-int rpm_create_interleaved_mr(rpm_mn_t *mn, int mr_id, int nr_mrs, int sub_mr_ids[], size_t strip_size);
-int rpm_start_mn(rpm_mn_t *mn);
-void rpm_destroy_mn(rpm_mn_t *mn);
+/* Local */
 
-/* Local server */
+typedef struct rpma_cli rpma_cli_t;
+typedef struct rpma_buf rpma_buf_t;
+typedef unsigned long rpma_flag_t;
 
-typedef struct rpm_pool rpm_pool_t;
-typedef struct rpm_buf rpm_buf_t;
-typedef unsigned long rpm_flag_t;
-typedef uint64_t rpm_ptr_t;
-
-struct rpm_buf {
+struct rpma_buf {
     void *start;
     size_t size;
 };
 
-rpm_pool_t *rpm_connect_pool(perf_t *perf, const char **hosts);
-void rpm_destroy_pool(rpm_pool_t *pool);
+rpma_cli_t *rpma_cli_create(perf_t *perf, const char *host);
+void rpma_cli_destroy(rpma_cli_t *cli);
 
-void *rpm_alloc(rpm_pool_t *pool, size_t size);
+void *rpma_alloc(rpma_cli_t *cli, size_t size);
 
-int rpm_wr_(rpm_pool_t *pool, rpm_ptr_t dst, rpm_buf_t src[], rpm_flag_t flag);
-int rpm_rd_(rpm_pool_t *pool, rpm_buf_t dst[], rpm_ptr_t src, rpm_flag_t flag);
-int rpm_flush(rpm_pool_t *pool, rpm_ptr_t addr, size_t size, rpm_flag_t flag);
+int rpma_wr_(rpma_cli_t *cli, size_t dst, rpma_buf_t src[], rpma_flag_t flag);
+int rpma_rd_(rpma_cli_t *cli, rpma_buf_t dst[], size_t src, rpma_flag_t flag);
+int rpma_flush(rpma_cli_t *cli, size_t off, size_t size, rpma_flag_t flag);
 
-int rpm_commit(rpm_pool_t *pool);
-int rpm_sync(rpm_pool_t *pool);
+int rpma_commit(rpma_cli_t *cli);
+int rpma_sync(rpma_cli_t *cli);
 
-static inline int rpm_commit_sync(rpm_pool_t *pool) {
-    int ret = rpm_commit(pool);
+static inline int rpma_commit_sync(rpma_cli_t *cli) {
+    int ret = rpma_commit(cli);
     if (ret) {
         return ret;
     }
-    return rpm_sync(pool);
+    return rpma_sync(cli);
 }
 
-#define rpm_buflist(pool, ...)          ((rpm_buf_t[]) { __VA_ARGS__, { NULL, 0 } })
-#define rpm_wr(pool, src, flag, ...)    rpm_wr_((pool), (src), rpm_buflist((pool), __VA_ARGS__), (flag))
-#define rpm_rd(pool, dst, flag, ...)    rpm_rd_((pool), rpm_buflist((pool), __VA_ARGS__), (dst), (flag))
+#define rpma_buflist(cli, ...)          ((rpma_buf_t[]) { __VA_ARGS__, { NULL, 0 } })
+#define rpma_wr(cli, src, flag, ...)    rpma_wr_((cli), (src), rpma_buflist((cli), __VA_ARGS__), (flag))
+#define rpma_rd(cli, dst, flag, ...)    rpma_rd_((cli), rpma_buflist((cli), __VA_ARGS__), (dst), (flag))
 
-#endif //RPM_H
+#endif // RPM_H
