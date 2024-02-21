@@ -14,6 +14,7 @@
 #include <sys/mman.h>
 #include <pthread.h>
 
+#include "alloc.h"
 #include "list.h"
 #include "perf.h"
 #include "rpm.h"
@@ -71,6 +72,8 @@ struct rpma_cli {
 
     struct wr_list wr_list;
     int nr_cqe;
+
+    allocator_t *allocator;
 };
 
 struct pdata {
@@ -614,6 +617,13 @@ rpma_cli_t *rpma_cli_create(perf_t *perf, const char *host, const char *dev_ip) 
         goto out_destroy_id;
     }
 
+    cli->allocator = allocator_create(cli->size);
+    if (unlikely(IS_ERR(cli->allocator))) {
+        cli = ERR_PTR(cli->allocator);
+        pr_err("failed to create allocator: %s", strerror(-PTR_ERR(cli->allocator)));
+        goto out_destroy_id;
+    }
+
     pr_debug(10, "rpma [%s] -> %s size=%lu,qpn=%d,rkey=%u)", dev_ip, host, cli->size, cli->qp->qp_num, cli->rkey);
 
 out_destroy_id:
@@ -676,7 +686,7 @@ static inline void *push_operand(rpma_cli_t *cli, void *start, size_t len) {
     return p;
 }
 
-void *rpma_alloc(rpma_cli_t *cli, size_t size) {
+void *rpma_buf_alloc(rpma_cli_t *cli, size_t size) {
     return push_operand(cli, NULL, size);
 }
 
@@ -887,4 +897,12 @@ int rpma_sync(rpma_cli_t *cli) {
 
 out:
     return ret;
+}
+
+size_t rpma_alloc(rpma_cli_t *cli, size_t size) {
+    return allocator_alloc(cli->allocator, size);
+}
+
+void rpma_free(rpma_cli_t *cli, size_t off, size_t size) {
+    return allocator_free(cli->allocator, off, size);
 }

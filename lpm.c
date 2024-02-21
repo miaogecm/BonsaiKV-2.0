@@ -59,16 +59,11 @@ lpma_t *lpma_create(int nr_devs, const char *dev_paths[], size_t strip_size) {
         lpma->size += lpma->devs[i].size;
     }
 
-    if (nr_devs > 1) {
-        pr_debug(10, "create interleaved lpma on %d devices with strip size %lu", nr_devs, strip_size);
-    } else {
-        pr_debug(10, "create lpma @ %s", dev_paths[0]);
-    }
-
     lpma->allocator = allocator_create(lpma->size);
     if (unlikely(IS_ERR(lpma->allocator))) {
         lpma = ERR_PTR(lpma->allocator);
         pr_err("failed to create allocator: %s", strerror(-PTR_ERR(lpma->allocator)));
+        goto out;
     }
 
     lpma->socket = lpma->devs[0].socket;
@@ -77,6 +72,12 @@ lpma_t *lpma_create(int nr_devs, const char *dev_paths[], size_t strip_size) {
             lpma->socket = -1;
             break;
         }
+    }
+
+    if (nr_devs > 1) {
+        pr_debug(10, "create interleaved lpma on %d devices with strip size %lu", nr_devs, strip_size);
+    } else {
+        pr_debug(10, "create lpma @ %s", dev_paths[0]);
     }
 
 out:

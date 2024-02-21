@@ -41,7 +41,7 @@ rpma_cli_t *rpma_cli_create(perf_t *perf, const char *host, const char *dev_ip);
 void rpma_cli_destroy(rpma_cli_t *cli);
 
 int rpma_add_mr(rpma_cli_t *cli, void *start, size_t size);
-void *rpma_alloc(rpma_cli_t *cli, size_t size);
+void *rpma_buf_alloc(rpma_cli_t *cli, size_t size);
 
 int rpma_wr_(rpma_cli_t *cli, size_t dst, rpma_buf_t src[], rpma_flag_t flag);
 int rpma_rd_(rpma_cli_t *cli, rpma_buf_t dst[], size_t src, rpma_flag_t flag);
@@ -61,5 +61,8 @@ static inline int rpma_commit_sync(rpma_cli_t *cli) {
 #define rpma_buflist(cli, ...)          ((rpma_buf_t[]) { __VA_ARGS__, { NULL, 0 } })
 #define rpma_wr(cli, dst, flag, ...)    rpma_wr_((cli), (dst), rpma_buflist((cli), __VA_ARGS__), (flag))
 #define rpma_rd(cli, src, flag, ...)    rpma_rd_((cli), rpma_buflist((cli), __VA_ARGS__), (src), (flag))
+
+size_t rpma_alloc(rpma_cli_t *cli, size_t size);
+void rpma_free(rpma_cli_t *cli, size_t off, size_t size);
 
 #endif // RPM_H
