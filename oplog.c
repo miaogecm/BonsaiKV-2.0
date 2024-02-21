@@ -9,10 +9,12 @@
 #define _GNU_SOURCE
 
 #include <sched.h>
+#include <urcu.h>
 #include <numa.h>
 
 #include "oplog.h"
 #include "lock.h"
+#include "list.h"
 
 #define NR_CLIS_MAX      1024
 
@@ -23,6 +25,8 @@ struct logger_dev {
 };
 
 struct logger {
+    kc_t *kc;
+
     struct logger_dev *devs;
     int nr_devs;
 
@@ -51,6 +55,13 @@ struct oplog_data {
     char key[];
 };
 
+struct lcb {
+    struct rcu_head rcu;
+    /* Logs between [@start, @tail) reside in LCB and not persisted */
+    size_t start;
+    char data[];
+};
+
 struct logger_cli {
     logger_t *logger;
     int id;
@@ -63,21 +74,33 @@ struct logger_cli {
      */
     size_t head, tail;
 
-    /*
-     * Logs between [ALIGN_DOWN(tail, lcb_size), tail) are in LCB and not persisted.
-     */
+    struct lcb *lcb;
     size_t lcb_size;
     int lcb_shift;
-    void *lcb;
 
-    /* @tail and @lcb should be updated atomically. */
-    seqcount_t seq;
+    /*  */
+    void *lcache;
 
     lpma_t *lpma;
     void *log_region;
+    size_t log_region_size;
 };
 
-logger_t *logger_create(int nr_devs, const char *dev_paths[], int lcb_shift) {
+struct logger_cli_barrier {
+    struct logger_cli *cli;
+
+    size_t head_snap, tail_snap;
+
+    void *prefetched;
+};
+
+struct logger_barrier {
+    struct logger_cli *cli;
+
+    struct logger_cli_barrier cli_barriers[];
+};
+
+logger_t *logger_create(kc_t *kc, int nr_devs, const char *dev_paths[], int lcb_shift) {
     logger_t *logger;
     lpma_t *lpma;
     int i;
@@ -94,6 +117,8 @@ logger_t *logger_create(int nr_devs, const char *dev_paths[], int lcb_shift) {
         pr_err("failed to allocate memory for logger");
         goto out;
     }
+
+    logger->kc = kc;
 
     logger->nr_devs = nr_devs;
     logger->devs = calloc(nr_devs, sizeof(*logger->devs));
@@ -194,8 +219,6 @@ logger_cli_t *logger_cli_create(logger_t *logger, perf_t *perf, int id, size_t l
     cli->lcb_shift = logger->lcb_shift;
     cli->lcb_size = logger->lcb_size;
 
-    seqcount_init(&cli->seq);
-
     cli->lpma = find_cli_dev(logger);
     if (unlikely(!cli->lpma)) {
         cli = ERR_PTR(-ENODEV);
@@ -210,6 +233,7 @@ logger_cli_t *logger_cli_create(logger_t *logger, perf_t *perf, int id, size_t l
         goto out;
     }
     cli->log_region = lpma_get_ptr(cli->lpma, logs_off);
+    cli->log_region_size = log_region_size;
 
     logger->clis[id] = cli;
 
@@ -224,35 +248,255 @@ void logger_cli_destroy(logger_cli_t *logger_cli) {
     free(logger_cli);
 }
 
-static inline void flush_lcb(logger_cli_t *logger_cli) {
-
-    logger_cli->tail
+static void free_lcb(struct rcu_head *head) {
+    struct lcb *lcb = container_of(head, struct lcb, rcu);
+    free(lcb);
 }
 
-oplog_t logger_append(logger_cli_t *logger_cli, op_t op, const char *key, size_t key_len, void *val) {
-    size_t ptail, lcb_used;
+static int flush_lcb(logger_cli_t *logger_cli) {
+    struct lcb *old_lcb, *new_lcb;
+    size_t size, off;
+    int ret = 0;
+
+    /* flush data into pmem */
+    off = logger_cli->lcb->start;
+    size = logger_cli->tail - off;
+    memcpy_nt(logger_cli->log_region + off, logger_cli->lcb, size);
+    memory_sfence();
+
+    /* allocate new LCB, we do not overwrite old LCB since some lock-free readers may accessing it */
+    new_lcb = malloc(sizeof(struct lcb) + logger_cli->lcb_size);
+    new_lcb->start = logger_cli->tail;
+    if (unlikely(new_lcb == NULL)) {
+        ret = -ENOMEM;
+        pr_err("failed to allocate memory for lcb");
+        goto out;
+    }
+
+    /* delay free old LCB (until no readers see it) */
+    old_lcb = logger_cli->lcb;
+    call_rcu(&old_lcb->rcu, free_lcb);
+
+    /* replace current LCB */
+    rcu_assign_pointer(logger_cli->lcb, new_lcb);
+
+    pr_debug(20, "lcb flush, cli=%d, off=%lu, size=%lu, lcb:%p->%p",
+             logger_cli->id, off, size, old_lcb, new_lcb);
+
+out:
+    return ret;
+}
+
+oplog_t logger_append(logger_cli_t *logger_cli, op_t op, k_t key, void *val) {
     struct oplog_data *log;
     struct oplog_ptr p;
+    size_t lcb_used;
+    int ret;
 
+    /* generate new log pointer */
     p.cli_id = logger_cli->id;
     p.off = logger_cli->tail;
 
-    ptail = ALIGN_DOWN(logger_cli->tail, logger_cli->lcb_size);
-    lcb_used = logger_cli->tail - ptail;
-    log = logger_cli->lcb + lcb_used;
+    lcb_used = logger_cli->tail - logger_cli->lcb->start;
+    log = (void *) logger_cli->lcb->data + lcb_used;
 
-    if (unlikely(lcb_used + sizeof(*log) + key_len > logger_cli->lcb_size)) {
-        flush_lcb(logger_cli);
+    /* special case: LCB full */
+    if (unlikely(lcb_used + sizeof(*log) + key.len > logger_cli->lcb_size)) {
+        ret = flush_lcb(logger_cli);
+        if (unlikely(ret)) {
+            p.val = ret;
+            pr_err("failed to flush lcb");
+        } else {
+            p.val = logger_append(logger_cli, op, key, val);
+        }
+        goto out;
     }
 
+    /* copy log into LCB */
     log->op = op;
-    log->key_len = key_len;
+    log->key_len = key.len;
     log->val = val;
-    memcpy(log->key, key, key_len);
+    memcpy(log->key, key.key, key.len);
 
+    /* forward tail */
+    logger_cli->tail += sizeof(*log) + key.len;
+
+    pr_debug(30, "log append, cli=%d, off=%lu, key=%s, val=%p,",
+             logger_cli->id, p.off, k_str(logger_cli->logger->kc, key), val);
+
+out:
     return p.val;
 }
 
-op_t logger_get(logger_cli_t *logger_cli, oplog_t oplog, const char **key, size_t *key_len, void **val) {
+op_t logger_get(logger_cli_t *logger_cli, oplog_t log, k_t *key, void **val) {
+    struct oplog_ptr o = { .val = log };
+    logger_cli_t *target_cli;
+    struct oplog_data *log;
+    struct lcb *lcb;
+    op_t op;
 
+    /* get the client of the oplog */
+    target_cli = logger_cli->logger->clis[o.cli_id];
+    bonsai_assert(target_cli);
+
+    lcb = rcu_dereference(target_cli->lcb);
+
+    /* log in PM or LCB? */
+    if (likely(o.off < lcb->start)) {
+        /* in PM */
+        bonsai_assert(o.off < target_cli->log_region_size);
+        log = target_cli->log_region + o.off;
+    } else {
+        /* in LCB */
+        bonsai_assert(o.off - lcb->start < target_cli->lcb_size);
+        log = (void *) lcb->data + (o.off - lcb->start);
+    }
+
+    /* get log pointer */
+    op = log->op;
+    key->key = log->key;
+    key->len = log->key_len;
+    *val = log->val;
+
+out:
+    return op;
+}
+
+static inline void logger_cpy(logger_cli_t *cli, void *dst, size_t head, size_t tail) {
+    struct lcb *lcb;
+
+    lcb = rcu_dereference(cli->lcb);
+
+    /* copy in-PM logs to dst */
+    bonsai_assert(lcb->start - head <= cli->log_region_size);
+    memcpy(dst, cli->log_region + head, lcb->start - head);
+
+    /* copy in-LCB logs to dst */
+    bonsai_assert(tail - lcb->start <= cli->lcb_size);
+    memcpy(dst + lcb->start - head, lcb->data, tail - lcb->start);
+}
+
+logger_barrier_t *logger_snap_barrier(logger_cli_t *logger_cli) {
+    struct logger_cli_barrier *cb;
+    logger_barrier_t *lb;
+    int i;
+
+    lb = malloc(sizeof(*lb) + sizeof(struct logger_cli_barrier) * NR_CLIS_MAX);
+    if (unlikely(lb == NULL)) {
+        lb = ERR_PTR(-ENOMEM);
+        pr_err("failed to allocate memory for logger_barrier_t");
+        goto out;
+    }
+
+    lb->cli = logger_cli;
+
+    for (i = 0; i < NR_CLIS_MAX; i++) {
+        cb = &lb->cli_barriers[i];
+
+        cb->cli = logger_cli->logger->clis[i];
+        if (!cb->cli) {
+            continue;
+        }
+
+        /* snapshot current tail */
+        cb->head_snap = cb->cli->head;
+        cb->tail_snap = cb->cli->tail;
+    }
+
+out:
+    return lb;
+}
+
+op_t logger_get_within_barrier(logger_barrier_t *barrier, oplog_t log, k_t *key, void **val) {
+    struct oplog_ptr o = { .val = log };
+    struct logger_cli_barrier *cb;
+    struct oplog_data *data;
+    op_t op;
+
+    cb = &barrier->cli_barriers[o.cli_id];
+    if (unlikely(!cb)) {
+        /* no corresponding cli barrier */
+        op = -ENOENT;
+        goto out;
+    }
+
+    if (unlikely(log < cb->head_snap || log >= cb->tail_snap)) {
+        /* not within range */
+        op = -ENOENT;
+        goto out;
+    }
+
+    if (unlikely(!cb->prefetched)) {
+        /* not prefetched, slow path */
+        op = logger_get(cb->cli, log, key, val);
+        goto out;
+    }
+
+    /* read log in DRAM (fast path) */
+    data = cb->prefetched + (log - cb->head_snap);
+    op = data->op;
+    key->key = data->key;
+    key->len = data->key_len;
+    *val = data->val;
+
+out:
+    return op;
+}
+
+
+void logger_destroy_barrier(logger_barrier_t *barrier) {
+    struct logger_cli_barrier *cb;
+    int i;
+
+    for (i = 0; i < NR_CLIS_MAX; i++) {
+        cb = &barrier->cli_barriers[i];
+        if (!cb->cli) {
+            continue;
+        }
+
+        if (cb->prefetched) {
+            free(cb->prefetched);
+        }
+    }
+
+    free(barrier);
+}
+
+void logger_prefetch_until_barrier(logger_barrier_t *barrier) {
+    struct logger_cli_barrier *cb;
+    int i;
+
+    for (i = 0; i < NR_CLIS_MAX; i++) {
+        cb = &barrier->cli_barriers[i];
+        if (!cb->cli) {
+            continue;
+        }
+
+        if (unlikely(cb->prefetched)) {
+            continue;
+        }
+
+        cb->prefetched = malloc(cb->tail_snap - cb->head_snap);
+        if (unlikely(!cb->prefetched)) {
+            pr_warn("no enough memory for prefetch logs within logger cli barrier");
+            continue;
+        }
+
+        logger_cpy(cb->cli, cb->prefetched, cb->head_snap, cb->tail_snap);
+    }
+}
+
+void logger_gc_before_barrier(logger_barrier_t *barrier) {
+    struct logger_cli_barrier *cb;
+    int i;
+
+    for (i = 0; i < NR_CLIS_MAX; i++) {
+        cb = &barrier->cli_barriers[i];
+        if (!cb->cli) {
+            continue;
+        }
+
+        bonsai_assert(cb->cli->head <= cb->tail_snap);
+        WRITE_ONCE(cb->cli->head, cb->tail_snap);
+    }
 }

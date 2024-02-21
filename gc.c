@@ -94,7 +94,7 @@ static void *gc_thread(void *arg) {
             continue;
         }
 
-        pr_debug(20, "gc logs start (nr=%d) before %s", nr_logs, logger_str_barrier(barrier));
+        pr_debug(20, "gc logs start (nr=%d)", nr_logs, logger_str_barrier(barrier));
 
         /* ingest logs before barrier */
         ingest_until_barrier(gc_cli, barrier);

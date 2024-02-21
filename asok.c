@@ -282,7 +282,7 @@ asok_t *asok_create(kv_t *kv, const char *sock_path) {
         cpu_relax();
     }
 
-    pr_info("asok created, tid=%d", asok->tid);
+    pr_debug(5, "asok created, tid=%d", asok->tid);
 
 out:
     return asok;

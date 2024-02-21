@@ -39,10 +39,10 @@ void logger_cli_destroy(logger_cli_t *logger_cli);
 oplog_t logger_append(logger_cli_t *logger_cli, op_t op, k_t key, void *val);
 op_t logger_get(logger_cli_t *logger_cli, oplog_t log, k_t *key, void **val);
 
-logger_barrier_t *logger_snap_barrier(logger_cli_t *logger_cli, int *nr_logs);
+logger_barrier_t *logger_snap_barrier(logger_cli_t *logger_cli);
+op_t logger_get_within_barrier(logger_barrier_t *barrier, oplog_t log, k_t *key, void **val);
 void logger_prefetch_until_barrier(logger_barrier_t *barrier);
 void logger_gc_before_barrier(logger_barrier_t *barrier);
 void logger_destroy_barrier(logger_barrier_t *barrier);
-const char *logger_str_barrier(logger_barrier_t *barrier);
 
 #endif // OPLOG_H
