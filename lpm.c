@@ -90,7 +90,7 @@ void lpma_destroy(lpma_t *lpma) {
     free(lpma);
 }
 
-static inline int va2pa(lpma_t *lpma, size_t *dev_off, size_t *next_off, size_t off) {
+static inline size_t va2pa(lpma_t *lpma, size_t *dev_off, size_t off) {
     size_t stripe_id, strip_id;
 
     stripe_id = off / lpma->stripe_size;
@@ -101,34 +101,53 @@ static inline int va2pa(lpma_t *lpma, size_t *dev_off, size_t *next_off, size_t 
 }
 
 void *lpma_get_ptr(lpma_t *lpma, size_t off) {
-    size_t dev_off, next_off;
+    size_t dev_off;
     int dev_id;
 
     if (lpma->nr_devs == 1) {
         return lpma->devs[0].start + off;
     }
 
-    dev_id = va2pa(lpma, &dev_off, &next_off, off);
+    dev_id = va2pa(lpma, &dev_off, off);
 
     return lpma->devs[dev_id].start + dev_off;
 }
 
+static inline void do_wr(void *dst, const void *src, size_t size, bool cache) {
+    if (cache) {
+        memcpy(dst, src, size);
+    } else {
+        memcpy_nt(dst, src, size);
+    }
+}
+
+static inline void do_lpma_wr_fastpath(lpma_t *lpma, size_t dst, void *src, size_t size, bool cache) {
+    bonsai_assert(lpma->nr_devs == 1);
+    do_wr(lpma->devs[0].start + dst, src, size, cache);
+}
+
+static inline void do_lpma_wr_slowpath(lpma_t *lpma, size_t dst, void *src, size_t size, bool cache) {
+    size_t dev_off, strip_off, len;
+    int dev_id;
+
+    strip_off = dst % lpma->strip_size;
+    dev_id = va2pa(lpma, &dev_off, dst);
+
+    if (strip_off + size <= lpma->strip_size) {
+        do_wr(lpma->devs[dev_id].start + dev_off, src, size, cache);
+    } else {
+        len = lpma->strip_size - strip_off;
+        do_wr(lpma->devs[dev_id].start + dev_off, src, len, cache);
+        do_lpma_wr_slowpath(lpma, dst + len, src + len, size - len, cache);
+    }
+}
+
 static inline void do_lpma_wr(lpma_t *lpma, size_t dst, void *src, size_t size, bool cache) {
-    void *start;
-
     if (lpma->nr_devs == 1) {
-        start = lpma->devs[0].start;
-
-        if (cache) {
-            memcpy(start + dst, src, size);
-        } else {
-            memcpy_nt(start + dst, src, size);
-        }
-
+        do_lpma_wr_fastpath(lpma, dst, src, size, cache);
         return;
     }
-
-    /* TODO: FIXME */
+    do_lpma_wr_slowpath(lpma, dst, src, size, cache);
 }
 
 void lpma_wr(lpma_t *lpma, size_t dst, void *src, size_t size) {
@@ -139,36 +158,91 @@ void lpma_wr_nc(lpma_t *lpma, size_t dst, void *src, size_t size) {
     return do_lpma_wr(lpma, dst, src, size, false);
 }
 
+static inline void do_lpma_rd_fastpath(lpma_t *lpma, void *dst, size_t src, size_t size) {
+    bonsai_assert(lpma->nr_devs == 1);
+    memcpy(dst, lpma->devs[0].start + src, size);
+}
+
+static inline void do_lpma_rd_slowpath(lpma_t *lpma, void *dst, size_t src, size_t size) {
+    size_t dev_off, strip_off, len;
+    int dev_id;
+
+    strip_off = src % lpma->strip_size;
+    dev_id = va2pa(lpma, &dev_off, src);
+
+    if (strip_off + size <= lpma->strip_size) {
+        memcpy(dst, lpma->devs[dev_id].start + dev_off, size);
+    } else {
+        len = lpma->strip_size - strip_off;
+        memcpy(dst, lpma->devs[dev_id].start + dev_off, len);
+        do_lpma_rd_slowpath(lpma, dst + len, src + len, size - len);
+    }
+}
+
+static inline void do_lpma_prefetch_fastpath(lpma_t *lpma, size_t off, size_t size) {
+    bonsai_assert(lpma->nr_devs == 1);
+    prefetch_range(lpma->devs[0].start + off, size);
+}
+
+static inline void do_lpma_prefetch_slowpath(lpma_t *lpma, size_t off, size_t size) {
+    size_t dev_off, strip_off, len;
+    int dev_id;
+
+    strip_off = off % lpma->strip_size;
+    dev_id = va2pa(lpma, &dev_off, off);
+
+    if (strip_off + size <= lpma->strip_size) {
+        prefetch_range(lpma->devs[dev_id].start + dev_off, size);
+    } else {
+        len = lpma->strip_size - strip_off;
+        prefetch_range(lpma->devs[dev_id].start + dev_off, len);
+        do_lpma_prefetch_slowpath(lpma, off + len, size - len);
+    }
+}
+
 void lpma_rd(lpma_t *lpma, void *dst, size_t src, size_t size) {
-    void *start;
-
     if (lpma->nr_devs == 1) {
-        start = lpma->devs[0].start;
-
-        memcpy(dst, start + src, size);
-
+        do_lpma_rd_fastpath(lpma, dst, src, size);
         return;
     }
-
-    /* TODO: FIXME */
+    do_lpma_rd_slowpath(lpma, dst, src, size);
 }
 
 void lpma_prefetch(lpma_t *lpma, size_t off, size_t size) {
-    /* TODO: FIXME */
+    if (lpma->nr_devs == 1) {
+        do_lpma_prefetch_fastpath(lpma, off, size);
+        return;
+    }
+    do_lpma_prefetch_slowpath(lpma, off, size);
+}
+
+static inline void do_lpma_flush_fastpath(lpma_t *lpma, size_t off, size_t size) {
+    bonsai_assert(lpma->nr_devs == 1);
+    flush_range(lpma->devs[0].start + off, size);
+}
+
+static inline void do_lpma_flush_slowpath(lpma_t *lpma, size_t off, size_t size) {
+    size_t dev_off, strip_off, len;
+    int dev_id;
+
+    strip_off = off % lpma->strip_size;
+    dev_id = va2pa(lpma, &dev_off, off);
+
+    if (strip_off + size <= lpma->strip_size) {
+        flush_range(lpma->devs[dev_id].start + dev_off, size);
+    } else {
+        len = lpma->strip_size - strip_off;
+        flush_range(lpma->devs[dev_id].start + dev_off, len);
+        do_lpma_flush_slowpath(lpma, off + len, size - len);
+    }
 }
 
 void lpma_flush(lpma_t *lpma, size_t off, size_t size) {
-    void *start;
-
     if (lpma->nr_devs == 1) {
-        start = lpma->devs[0].start;
-
-        flush_range(start + off, size);
-
+        do_lpma_flush_fastpath(lpma, off, size);
         return;
     }
-
-    /* TODO: FIXME */
+    do_lpma_flush_slowpath(lpma, off, size);
 }
 
 void lpma_persist(lpma_t *lpma) {

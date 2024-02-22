@@ -178,6 +178,32 @@ static inline void flush_range(void* buf, uint32_t len) {
 	}
 }
 
+static inline void prefetch(const void *ptr) {
+	typedef struct { char x[CACHELINE_SIZE]; } cacheline_t;
+	asm volatile("prefetcht0 %0" : : "m" (*(const cacheline_t *)ptr));
+}
+
+static inline void prefetchnta(const void *ptr) {
+	typedef struct { char x[CACHELINE_SIZE]; } cacheline_t;
+	asm volatile("prefetchnta %0" : : "m" (*(const cacheline_t *)ptr));
+}
+
+static inline void prefetch_range(void* buf, uint32_t len) {
+	uint32_t i;
+	len = len + ((unsigned long)(buf) & (CACHELINE_SIZE - 1));
+	for (i = 0; i < len; i += CACHELINE_SIZE) {
+		prefetch(buf + i);
+	}
+}
+
+static inline void prefetchnta_range(void* buf, uint32_t len) {
+	uint32_t i;
+	len = len + ((unsigned long)(buf) & (CACHELINE_SIZE - 1));
+	for (i = 0; i < len; i += CACHELINE_SIZE) {
+		prefetch(buf + i);
+	}
+}
+
 static void memcpy_nt(void *dst, void *src, size_t len) {
 	int i;
 	long long t1, t2, t3, t4;
