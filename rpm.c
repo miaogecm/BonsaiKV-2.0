@@ -69,6 +69,7 @@ struct rpma_cli {
     uint32_t rkey;
 
     size_t size;
+    size_t strip_size, stripe_size;
 
     struct wr_list wr_list;
     int nr_cqe;
@@ -77,7 +78,7 @@ struct rpma_cli {
 };
 
 struct pdata {
-    size_t size;
+    size_t size, strip_size, stripe_size;
     uint32_t rkey;
 };
 
@@ -241,6 +242,8 @@ static inline int handle_event_connect_request(rpma_svr_t *svr, struct rdma_cm_i
     /* prepare exchange information */
     pdata.rkey = rkey;
     pdata.size = svr->size;
+    pdata.strip_size = svr->strip_size;
+    pdata.stripe_size = svr->stripe_size;
     conn_param.private_data = &pdata;
     conn_param.private_data_len = sizeof(pdata);
 
@@ -609,6 +612,8 @@ rpma_cli_t *rpma_cli_create(perf_t *perf, const char *host, const char *dev_ip) 
     cli->cq = id->send_cq;
     cli->rkey = pdata.rkey;
     cli->size = pdata.size;
+    cli->strip_size = pdata.strip_size;
+    cli->stripe_size = pdata.stripe_size;
 
     ret = create_cli_buf(cli, CLI_BUF_SIZE);
     if (unlikely(ret)) {
@@ -905,4 +910,12 @@ size_t rpma_alloc(rpma_cli_t *cli, size_t size) {
 
 void rpma_free(rpma_cli_t *cli, size_t off, size_t size) {
     return allocator_free(cli->allocator, off, size);
+}
+
+size_t rpma_get_strip_size(rpma_cli_t *cli) {
+    return cli->strip_size;
+}
+
+size_t rpma_get_stripe_size(rpma_cli_t *cli) {
+    return cli->stripe_size;
 }

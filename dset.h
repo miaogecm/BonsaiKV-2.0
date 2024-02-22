@@ -23,10 +23,10 @@ typedef struct dcli dcli_t;
 typedef struct dset dset_t;
 typedef void (*dset_chg_hint_cb_t)(void *priv, dhint_t new_hint, k_t s, k_t t);
 
-dset_t *dset_create();
+dset_t *dset_create(kc_t *kc);
 void dset_destroy(dset_t *dset);
 
-dcli_t *dcli_create(dset_t *dset, dset_chg_hint_cb_t chg_hint_cb, void *priv, perf_t *perf, rpm_pool_t *pool);
+dcli_t *dcli_create(dset_t *dset, dset_chg_hint_cb_t chg_hint_cb, void *priv, perf_t *perf, rpma_cli_t *rpma_cli);
 void dcli_destroy(dcli_t *dcli);
 
 int dset_upsert(dcli_t *dcli, k_t key, void *val, dhint_t hint);

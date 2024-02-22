@@ -22,6 +22,7 @@ struct kc {
     int (*dump)(k_t k, char *buf, int buflen);
     uint64_t (*hash)(k_t k);
     k_t min, max;
+    size_t typical_len;
 };
 
 static inline uint64_t k_hash(kc_t *kc, k_t k) {

@@ -28,6 +28,7 @@ void rpma_svr_destroy(rpma_svr_t *svr);
 
 /* Local */
 
+typedef struct rpma rpma_t;
 typedef struct rpma_cli rpma_cli_t;
 typedef struct rpma_buf rpma_buf_t;
 typedef unsigned long rpma_flag_t;
@@ -37,7 +38,9 @@ struct rpma_buf {
     size_t size;
 };
 
-rpma_cli_t *rpma_cli_create(perf_t *perf, const char *host, const char *dev_ip);
+rpma_t *rpma_create(const char *host, const char *dev_ip);
+
+rpma_cli_t *rpma_cli_create(rpma_t *rpma, perf_t *perf);
 void rpma_cli_destroy(rpma_cli_t *cli);
 
 int rpma_add_mr(rpma_cli_t *cli, void *start, size_t size);
@@ -64,5 +67,8 @@ static inline int rpma_commit_sync(rpma_cli_t *cli) {
 
 size_t rpma_alloc(rpma_cli_t *cli, size_t size);
 void rpma_free(rpma_cli_t *cli, size_t off, size_t size);
+
+size_t rpma_get_strip_size(rpma_cli_t *cli);
+size_t rpma_get_stripe_size(rpma_cli_t *cli);
 
 #endif // RPM_H
