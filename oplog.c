@@ -18,20 +18,19 @@
 
 #define NR_CLIS_MAX      1024
 
-struct logger_dev {
+struct logger_shard {
     lpma_t *lpma;
-    /* clients bind to this dev */
+    /* clients bind to this shard */
     int nr_clis;
 };
 
 struct logger {
     kc_t *kc;
 
-    struct logger_dev *devs;
-    int nr_devs;
+    struct logger_shard *shards;
+    int nr_shards;
 
     size_t lcb_size;
-    int lcb_shift;
 
     spinlock_t lock;
 
@@ -76,12 +75,8 @@ struct logger_cli {
 
     struct lcb *lcb;
     size_t lcb_size;
-    int lcb_shift;
 
-    /*  */
-    void *lcache;
-
-    lpma_t *lpma;
+    lpma_cli_t *lpma_cli;
     void *log_region;
     size_t log_region_size;
 };
@@ -100,14 +95,13 @@ struct logger_barrier {
     struct logger_cli_barrier cli_barriers[];
 };
 
-logger_t *logger_create(kc_t *kc, int nr_devs, const char *dev_paths[], int lcb_shift) {
+logger_t *logger_create(kc_t *kc, int nr_shards, lpma_t **lpmas, size_t lcb_size) {
     logger_t *logger;
-    lpma_t *lpma;
     int i;
 
-    if (unlikely(nr_devs <= 0)) {
+    if (unlikely(nr_shards <= 0)) {
         logger = ERR_PTR(-EINVAL);
-        pr_err("invalid nr_devs: %d", nr_devs);
+        pr_err("invalid nr_shards: %d", nr_shards);
         goto out;
     }
 
@@ -120,28 +114,20 @@ logger_t *logger_create(kc_t *kc, int nr_devs, const char *dev_paths[], int lcb_
 
     logger->kc = kc;
 
-    logger->nr_devs = nr_devs;
-    logger->devs = calloc(nr_devs, sizeof(*logger->devs));
-    if (unlikely(logger->devs == NULL)) {
+    logger->nr_shards = nr_shards;
+    logger->shards = calloc(nr_shards, sizeof(*logger->shards));
+    if (unlikely(logger->shards == NULL)) {
         free(logger);
         logger = ERR_PTR(-ENOMEM);
         pr_err("failed to allocate memory for logger->devs");
         goto out;
     }
 
-    logger->lcb_shift = lcb_shift;
-    logger->lcb_size = 1ul << lcb_shift;
+    logger->lcb_size = lcb_size;
 
-    for (i = 0; i < nr_devs; i++) {
-        lpma = lpma_create(1, &dev_paths[i], 0);
-        if (unlikely(IS_ERR(lpma))) {
-            logger = ERR_PTR(lpma);
-            pr_err("failed to create lpma: %s", strerror(-PTR_ERR(lpma)));
-            goto out;
-        }
-
-        logger->devs[i].lpma = lpma;
-        logger->devs[i].nr_clis = 0;
+    for (i = 0; i < nr_shards; i++) {
+        logger->shards[i].lpma = lpmas[i];
+        logger->shards[i].nr_clis = 0;
     }
 
     logger->clis = calloc(NR_CLIS_MAX, sizeof(*logger->clis));
@@ -151,20 +137,14 @@ logger_t *logger_create(kc_t *kc, int nr_devs, const char *dev_paths[], int lcb_
         goto out;
     }
 
-    pr_debug(5, "created logger across %d PM devices, lcb_size=%luB", nr_devs, logger->lcb_size);
+    pr_debug(5, "created logger across %d local PM areas, lcb_size=%luB", nr_shards, logger->lcb_size);
 
 out:
     return logger;
 }
 
 void logger_destroy(logger_t *logger) {
-    int i;
-
-    for (i = 0; i < logger->nr_devs; i++) {
-        lpma_destroy(logger->devs[i].lpma);
-    }
-
-    free(logger->devs);
+    free(logger->shards);
     free(logger);
 }
 
@@ -173,36 +153,37 @@ static inline bool is_local_socket(int socket) {
 }
 
 static inline lpma_t *find_cli_dev(logger_t *logger) {
-    struct logger_dev *dev;
+    struct logger_shard *shard;
     int i, nr_clis;
 
     spin_lock(&logger->lock);
 
     /* find local logger device with least load */
-    dev = NULL;
+    shard = NULL;
     nr_clis = INT32_MAX;
-    for (i = 0; i < logger->nr_devs; i++) {
-        if (logger->devs[i].nr_clis < nr_clis && is_local_socket(lpma_socket(logger->devs[i].lpma))) {
-            dev = &logger->devs[i];
-            nr_clis = dev->nr_clis;
+    for (i = 0; i < logger->nr_shards; i++) {
+        if (logger->shards[i].nr_clis < nr_clis && is_local_socket(lpma_socket(logger->shards[i].lpma))) {
+            shard = &logger->shards[i];
+            nr_clis = shard->nr_clis;
         }
     }
 
-    if (unlikely(!dev)) {
+    if (unlikely(!shard)) {
         spin_unlock(&logger->lock);
         return NULL;
     }
 
-    dev->nr_clis++;
+    shard->nr_clis++;
 
     spin_unlock(&logger->lock);
 
-    return dev->lpma;
+    return shard->lpma;
 }
 
-logger_cli_t *logger_cli_create(logger_t *logger, perf_t *perf, int id, size_t log_region_size) {
+logger_cli_t *logger_cli_create(logger_t *logger, perf_t *perf, size_t log_region_size, int id) {
     logger_cli_t *cli;
     uint64_t logs_off;
+    lpma_t *lpma;
 
     cli = calloc(1, sizeof(*cli));
     if (unlikely(cli == NULL)) {
@@ -216,23 +197,28 @@ logger_cli_t *logger_cli_create(logger_t *logger, perf_t *perf, int id, size_t l
 
     cli->perf = perf;
 
-    cli->lcb_shift = logger->lcb_shift;
     cli->lcb_size = logger->lcb_size;
 
-    cli->lpma = find_cli_dev(logger);
-    if (unlikely(!cli->lpma)) {
+    lpma = find_cli_dev(logger);
+    if (unlikely(!lpma)) {
         cli = ERR_PTR(-ENODEV);
-        pr_err("failed to find suitable logger device");
+        pr_err("failed to find suitable logger LPMA");
+        goto out;
+    }
+    cli->lpma_cli = lpma_cli_create(lpma, perf);
+    if (unlikely(!cli->lpma_cli)) {
+        cli = ERR_PTR(-ENOMEM);
+        pr_err("failed to create lpma_cli");
         goto out;
     }
 
-    logs_off = lpma_alloc(cli->lpma, log_region_size);
+    logs_off = lpma_alloc(cli->lpma_cli, log_region_size);
     if (unlikely(IS_ERR(logs_off))) {
         cli = ERR_PTR(logs_off);
         pr_err("failed to allocate memory for logs: %s", strerror(-PTR_ERR(logs_off)));
         goto out;
     }
-    cli->log_region = lpma_get_ptr(cli->lpma, logs_off);
+    cli->log_region = lpma_get_ptr(cli->lpma_cli, logs_off);
     cli->log_region_size = log_region_size;
 
     logger->clis[id] = cli;
@@ -287,7 +273,7 @@ out:
     return ret;
 }
 
-oplog_t logger_append(logger_cli_t *logger_cli, op_t op, k_t key, void *val) {
+oplog_t logger_append(logger_cli_t *logger_cli, op_t op, k_t key, void *val, oplog_t depend) {
     struct oplog_data *log;
     struct oplog_ptr p;
     size_t lcb_used;
@@ -316,6 +302,7 @@ oplog_t logger_append(logger_cli_t *logger_cli, op_t op, k_t key, void *val) {
     log->op = op;
     log->key_len = key.len;
     log->val = val;
+    log->depend = depend;
     memcpy(log->key, key.key, key.len);
 
     /* forward tail */

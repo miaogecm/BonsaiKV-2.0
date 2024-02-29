@@ -31,12 +31,12 @@ static const char *op_str[] = {
     [OP_DEL] = "del"
 };
 
-logger_t *logger_create(int nr_devs, const char *dev_paths[]);
+logger_t *logger_create(kc_t *kc, int nr_shards, lpma_t **lpmas, size_t lcb_size);
 void logger_destroy(logger_t *logger);
-logger_cli_t *logger_cli_create(logger_t *logger, perf_t *perf, int id);
+logger_cli_t *logger_cli_create(logger_t *logger, perf_t *perf, size_t log_region_size, int id);
 void logger_cli_destroy(logger_cli_t *logger_cli);
 
-oplog_t logger_append(logger_cli_t *logger_cli, op_t op, k_t key, void *val);
+oplog_t logger_append(logger_cli_t *logger_cli, op_t op, k_t key, void *val, oplog_t depend);
 op_t logger_get(logger_cli_t *logger_cli, oplog_t log, k_t *key, void **val);
 
 logger_barrier_t *logger_snap_barrier(logger_cli_t *logger_cli);

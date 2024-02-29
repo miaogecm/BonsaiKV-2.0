@@ -39,6 +39,7 @@ struct rpma_buf {
 };
 
 rpma_t *rpma_create(const char *host, const char *dev_ip);
+void rpma_destroy(rpma_t *rpma);
 
 rpma_cli_t *rpma_cli_create(rpma_t *rpma, perf_t *perf);
 void rpma_cli_destroy(rpma_cli_t *cli);

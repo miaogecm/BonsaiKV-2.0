@@ -57,7 +57,14 @@ struct wr_list {
     struct ibv_send_wr *head, *tail;
 };
 
+struct rpma {
+    const char *dev_ip, *host;
+};
+
 struct rpma_cli {
+    rpma_t *rpma;
+    perf_t *perf;
+
     struct ibv_pd *pd;
 
     struct ibv_mr *mrs[MAX_CLI_NR_MRS];
@@ -478,7 +485,28 @@ out:
     return ret;
 }
 
-rpma_cli_t *rpma_cli_create(perf_t *perf, const char *host, const char *dev_ip) {
+rpma_t *rpma_create(const char *host, const char *dev_ip) {
+    rpma_t *rpma;
+
+    rpma = calloc(1, sizeof(*rpma));
+    if (unlikely(!rpma)) {
+        pr_err("failed to allocate memory for rpma_t");
+        rpma = ERR_PTR(-ENOMEM);
+        goto out;
+    }
+
+    rpma->host = host;
+    rpma->dev_ip = dev_ip;
+
+out:
+    return rpma;
+}
+
+void rpma_destroy(rpma_t *rpma) {
+    free(rpma);
+}
+
+rpma_cli_t *rpma_cli_create(rpma_t *rpma, perf_t *perf) {
     struct rdma_conn_param conn_param = { };
     struct rdma_event_channel *cm_chan;
     struct ibv_qp_init_attr init_attr;
@@ -496,6 +524,9 @@ rpma_cli_t *rpma_cli_create(perf_t *perf, const char *host, const char *dev_ip) 
         goto out;
     }
 
+    cli->rpma = rpma;
+    cli->perf = perf;
+
     cm_chan = rdma_create_event_channel();
     if (unlikely(!cm_chan)) {
         pr_err("failed to create RDMA event channel: %s", strerror(errno));
@@ -512,7 +543,7 @@ rpma_cli_t *rpma_cli_create(perf_t *perf, const char *host, const char *dev_ip) 
     memset(&sin, 0, sizeof(sin));
     sin.sin_family = AF_INET;
     sin.sin_port = htons(0);
-    inet_pton(AF_INET, dev_ip, &sin.sin_addr);
+    inet_pton(AF_INET, rpma->dev_ip, &sin.sin_addr);
 
     ret = rdma_bind_addr(id, (struct sockaddr *) &sin);
     if (unlikely(ret)) {
@@ -523,10 +554,10 @@ rpma_cli_t *rpma_cli_create(perf_t *perf, const char *host, const char *dev_ip) 
 
     memset(&sin, 0, sizeof(sin));
     sin.sin_family = AF_INET;
-    ret = parse_ip_port(host, &sin.sin_addr.s_addr, &sin.sin_port);
+    ret = parse_ip_port(rpma->host, &sin.sin_addr.s_addr, &sin.sin_port);
     if (unlikely(ret)) {
         cli = ERR_PTR(ret);
-        pr_err("failed to parse IP:PORT: %s", host);
+        pr_err("failed to parse IP:PORT: %s", rpma->host);
         goto out_destroy_id;
     }
 
@@ -629,7 +660,8 @@ rpma_cli_t *rpma_cli_create(perf_t *perf, const char *host, const char *dev_ip) 
         goto out_destroy_id;
     }
 
-    pr_debug(10, "rpma [%s] -> %s size=%lu,qpn=%d,rkey=%u)", dev_ip, host, cli->size, cli->qp->qp_num, cli->rkey);
+    pr_debug(10, "rpma [%s] -> %s size=%lu,qpn=%d,rkey=%u)",
+             rpma->dev_ip, rpma->host, cli->size, cli->qp->qp_num, cli->rkey);
 
 out_destroy_id:
     rdma_destroy_id(id);

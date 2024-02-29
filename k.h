@@ -1,7 +1,7 @@
 /*
  * BonsaiKV+: Scaling persistent in-memory key-value store for modern tiered, heterogeneous memory systems
  *
- * Key
+ * Key Management
  *
  * Hohai University
  */
@@ -13,7 +13,7 @@ typedef struct kc kc_t;
 typedef struct k k_t;
 
 struct k {
-    const char *key;
+    char *key;
     uint16_t len;
 };
 
@@ -33,15 +33,15 @@ static inline uint8_t k_fgprt(kc_t *kc, k_t k) {
     return k_hash(kc, k) & 0xff;
 }
 
-static int k_cmp(kc_t *kc, k_t k, k_t o) {
+static inline int k_cmp(kc_t *kc, k_t k, k_t o) {
     return kc->cmp(k, o);
 }
 
-static int k_dump(kc_t *kc, k_t k, char *buf, int buflen) {
+static inline int k_dump(kc_t *kc, k_t k, char *buf, int buflen) {
     return kc->dump(k, buf, buflen);
 }
 
-static char *k_str(kc_t *kc, k_t k) {
+static inline char *k_str(kc_t *kc, k_t k) {
     static __thread char buf[UINT16_MAX];
     return !k_dump(kc, k, buf, sizeof(buf)) ? buf : NULL;
 }

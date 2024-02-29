@@ -135,5 +135,5 @@ out:
 }
 
 void gc_cli_destroy(gc_cli_t *gc_cli) {
-
+    free(gc_cli);
 }
