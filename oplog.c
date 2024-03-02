@@ -39,7 +39,7 @@ struct logger {
 
 struct oplog_ptr {
     union {
-        uint64_t val;
+        uint64_t raw;
         struct {
             uint64_t cli_id : 16;
             uint64_t off : 48;
@@ -50,7 +50,8 @@ struct oplog_ptr {
 struct oplog_data {
     op_t op;
     uint32_t key_len;
-    void *val;
+    uint64_t valp;
+    uint64_t depend;
     char key[];
 };
 
@@ -273,7 +274,7 @@ out:
     return ret;
 }
 
-oplog_t logger_append(logger_cli_t *logger_cli, op_t op, k_t key, void *val, oplog_t depend) {
+oplog_t logger_append(logger_cli_t *logger_cli, op_t op, k_t key, uint64_t valp, oplog_t depend) {
     struct oplog_data *log;
     struct oplog_ptr p;
     size_t lcb_used;
@@ -290,10 +291,10 @@ oplog_t logger_append(logger_cli_t *logger_cli, op_t op, k_t key, void *val, opl
     if (unlikely(lcb_used + sizeof(*log) + key.len > logger_cli->lcb_size)) {
         ret = flush_lcb(logger_cli);
         if (unlikely(ret)) {
-            p.val = ret;
+            p.raw = ret;
             pr_err("failed to flush lcb");
         } else {
-            p.val = logger_append(logger_cli, op, key, val);
+            p.raw = logger_append(logger_cli, op, key, valp, depend);
         }
         goto out;
     }
@@ -301,22 +302,22 @@ oplog_t logger_append(logger_cli_t *logger_cli, op_t op, k_t key, void *val, opl
     /* copy log into LCB */
     log->op = op;
     log->key_len = key.len;
-    log->val = val;
+    log->valp = valp;
     log->depend = depend;
     memcpy(log->key, key.key, key.len);
 
     /* forward tail */
     logger_cli->tail += sizeof(*log) + key.len;
 
-    pr_debug(30, "log append, cli=%d, off=%lu, key=%s, val=%p,",
-             logger_cli->id, p.off, k_str(logger_cli->logger->kc, key), val);
+    pr_debug(30, "log append, cli=%d, off=%lu, key=%s, valp=%lx,",
+             logger_cli->id, p.off, k_str(logger_cli->logger->kc, key), valp);
 
 out:
-    return p.val;
+    return p.raw;
 }
 
-op_t logger_get(logger_cli_t *logger_cli, oplog_t log, k_t *key, void **val) {
-    struct oplog_ptr o = { .val = log };
+op_t logger_get(logger_cli_t *logger_cli, oplog_t log, k_t *key, uint64_t *valp) {
+    struct oplog_ptr o = { .raw = log };
     logger_cli_t *target_cli;
     struct oplog_data *log;
     struct lcb *lcb;
@@ -343,7 +344,7 @@ op_t logger_get(logger_cli_t *logger_cli, oplog_t log, k_t *key, void **val) {
     op = log->op;
     key->key = log->key;
     key->len = log->key_len;
-    *val = log->val;
+    *valp = log->valp;
 
 out:
     return op;
@@ -363,7 +364,7 @@ static inline void logger_cpy(logger_cli_t *cli, void *dst, size_t head, size_t 
     memcpy(dst + lcb->start - head, lcb->data, tail - lcb->start);
 }
 
-logger_barrier_t *logger_snap_barrier(logger_cli_t *logger_cli) {
+logger_barrier_t *logger_snap_barrier(logger_cli_t *logger_cli, size_t *total) {
     struct logger_cli_barrier *cb;
     logger_barrier_t *lb;
     int i;
@@ -377,6 +378,8 @@ logger_barrier_t *logger_snap_barrier(logger_cli_t *logger_cli) {
 
     lb->cli = logger_cli;
 
+    *total = 0;
+
     for (i = 0; i < NR_CLIS_MAX; i++) {
         cb = &lb->cli_barriers[i];
 
@@ -388,14 +391,16 @@ logger_barrier_t *logger_snap_barrier(logger_cli_t *logger_cli) {
         /* snapshot current tail */
         cb->head_snap = cb->cli->head;
         cb->tail_snap = cb->cli->tail;
+
+        *total += cb->tail_snap - cb->head_snap;
     }
 
 out:
     return lb;
 }
 
-op_t logger_get_within_barrier(logger_barrier_t *barrier, oplog_t log, k_t *key, void **val) {
-    struct oplog_ptr o = { .val = log };
+op_t logger_get_within_barrier(logger_barrier_t *barrier, oplog_t log, k_t *key, uint64_t *valp) {
+    struct oplog_ptr o = { .raw = log };
     struct logger_cli_barrier *cb;
     struct oplog_data *data;
     op_t op;
@@ -415,7 +420,7 @@ op_t logger_get_within_barrier(logger_barrier_t *barrier, oplog_t log, k_t *key,
 
     if (unlikely(!cb->prefetched)) {
         /* not prefetched, slow path */
-        op = logger_get(cb->cli, log, key, val);
+        op = logger_get(cb->cli, log, key, valp);
         goto out;
     }
 
@@ -424,7 +429,7 @@ op_t logger_get_within_barrier(logger_barrier_t *barrier, oplog_t log, k_t *key,
     op = data->op;
     key->key = data->key;
     key->len = data->key_len;
-    *val = data->val;
+    *valp = data->valp;
 
 out:
     return op;
