@@ -46,6 +46,7 @@ void rpma_cli_destroy(rpma_cli_t *cli);
 
 int rpma_add_mr(rpma_cli_t *cli, void *start, size_t size);
 void *rpma_buf_alloc(rpma_cli_t *cli, size_t size);
+void rpma_buf_free(rpma_cli_t *cli, void *buf, size_t size);
 
 int rpma_wr_(rpma_cli_t *cli, size_t dst, rpma_buf_t src[], rpma_flag_t flag);
 int rpma_rd_(rpma_cli_t *cli, rpma_buf_t dst[], size_t src, rpma_flag_t flag);

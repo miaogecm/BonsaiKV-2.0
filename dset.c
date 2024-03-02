@@ -3,6 +3,10 @@
  *
  * BonsaiKV+ scalable data layer
  *
+ * The core data structure exposed by data layer is "dset" (a collection/set of data nodes across different
+ * storage tiers). This data structure relies on an upper layer index to map a key to its corresponding
+ * dnodes at different storage tiers. The dnodes corresponding to a key is called as "data node group" (dgroup).
+ *
  * Hohai University
  */
 
@@ -46,7 +50,8 @@ struct dentry {
 
 struct mnode {
     size_t next_off, prev_off;
-    /* "0" means empty slot */
+    int nr_ents;
+    bool ref;
     uint8_t fgprt[];
 };
 
@@ -71,12 +76,19 @@ struct dset {
     rpma_t *rpma;
 
     size_t pstage_sz;
+
+    size_t pm_utilization;
+
+    size_t pivot_hnode;
+
+    int max_gc_prefetch;
 };
 
 struct dcli {
     dset_t *dset;
 
-    dset_chg_hint_cb_t chg_hint_cb;
+    dgroup_map_lookup_fn gm_lookuper;
+    dgroup_map_update_fn gm_updator;
     void *priv;
 
     rpma_cli_t *rpma_cli;
@@ -91,7 +103,9 @@ struct dcli {
     size_t pstage_sz;
 };
 
-dset_t *dset_create(kc_t *kc, size_t hnode_size, size_t cnode_size, lpma_t *lpma, rpma_t *rpma, size_t pstage_sz) {
+dset_t *dset_create(kc_t *kc, size_t hnode_size, size_t cnode_size,
+                    lpma_t *lpma, rpma_t *rpma, size_t pstage_sz,
+                    int max_gc_prefetch) {
     dset_t *dset;
 
     dset = calloc(1, sizeof(*dset));
@@ -110,6 +124,8 @@ dset_t *dset_create(kc_t *kc, size_t hnode_size, size_t cnode_size, lpma_t *lpma
 
     dset->pstage_sz = pstage_sz;
 
+    dset->max_gc_prefetch = max_gc_prefetch;
+
     pr_debug(5, "dset created, hnode size: %lu, cnode size: %lu", hnode_size, cnode_size);
 
 out:
@@ -120,9 +136,8 @@ void dset_destroy(dset_t *dset) {
     free(dset);
 }
 
-static inline uint64_t get_fgprt(dcli_t *dcli, k_t k) {
-    uint64_t hash = k_hash(dcli->kc, k);
-    return !hash ? 1 : hash;
+static inline uint8_t get_fgprt(dcli_t *dcli, k_t k) {
+    return k_hash(dcli->kc, k) & 0xff;
 }
 
 static inline int cmp_dentry(dcli_t *dcli, const struct dentry *d1, const struct dentry *d2) {
@@ -184,11 +199,22 @@ static inline size_t sizeof_dentry(dcli_t *dcli) {
     return dcli->kc->typical_len + sizeof(struct dentry);
 }
 
+static inline k_t get_hnode_lfence(dcli_t *dcli, struct mnode *mnode) {
+    struct fnode *fnode = (void *) mnode + dcli->hnode_size;
+    return (k_t) { .key = fnode->fences, .len = fnode->lfence_len };
+}
+
+static inline k_t get_hnode_rfence(dcli_t *dcli, struct mnode *mnode) {
+    struct fnode *fnode = (void *) mnode + dcli->hnode_size;
+    return (k_t) { .key = fnode->fences + fnode->lfence_len, .len = fnode->rfence_len };
+}
+
 static inline int create_sentinel(dcli_t *dcli) {
     dset_t *dset = dcli->dset;
     size_t msize, fsize;
     struct mnode *mnode;
     struct fnode *fnode;
+    dgroup_t dgroup;
     int ret = 0;
 
     fsize = sizeof(struct fnode) + dcli->kc->min.len + dcli->kc->max.len;
@@ -244,11 +270,26 @@ static inline int create_sentinel(dcli_t *dcli) {
         pr_err("failed to commit cnode sentinel: %s", strerror(-ret));
     }
 
+    rpma_buf_free(dcli->rpma_cli, mnode, msize);
+
+    /* init dgroup map */
+    dgroup.dnodes[0] = dset->sentinel_hnode;
+    dgroup.dnodes[1] = dset->sentinel_cnode;
+    ret = dcli->gm_updator(dcli->priv, dcli->kc->min, dcli->kc->max, dgroup);
+    if (unlikely(ret)) {
+        pr_err("failed to init dgroup map: %s", strerror(-ret));
+        goto out;
+    }
+
+    /* update statistics */
+    dset->pm_utilization += dcli->hnode_size + fsize;
+
 out:
     return ret;
 }
 
-dcli_t *dcli_create(dset_t *dset, dset_chg_hint_cb_t chg_hint_cb, void *priv, perf_t *perf) {
+dcli_t *dcli_create(dset_t *dset, dgroup_map_update_fn gm_updator, dgroup_map_lookup_fn gm_lookuper,
+                    void *priv, perf_t *perf) {
     size_t hstripe_size, cstripe_size;
     dcli_t *dcli;
     int ret;
@@ -259,7 +300,10 @@ dcli_t *dcli_create(dset_t *dset, dset_chg_hint_cb_t chg_hint_cb, void *priv, pe
         goto out;
     }
 
-    dcli->chg_hint_cb = chg_hint_cb;
+    dcli->dset = dset;
+
+    dcli->gm_lookuper = gm_lookuper;
+    dcli->gm_updator = gm_updator;
     dcli->priv = priv;
 
     dcli->perf = perf;
@@ -348,6 +392,42 @@ void dcli_destroy(dcli_t *dcli) {
     free(dcli);
 }
 
+static inline struct mnode *cnode_get_mnode(dcli_t *dcli, size_t cnode_off) {
+    struct mnode *mnode;
+    size_t msize;
+    int ret;
+
+    msize = sizeof(struct mnode) + dcli->cfanout * sizeof(uint8_t);
+
+    mnode = rpma_buf_alloc(dcli->rpma_cli, msize);
+    if (unlikely(IS_ERR(mnode))) {
+        pr_err("failed to allocate memory for mnode: %s", strerror(-PTR_ERR(mnode)));
+        goto out;
+    }
+
+    ret = rpma_rd(dcli->rpma_cli, cnode_off, 0, mnode, msize);
+    if (unlikely(ret < 0)) {
+        pr_err("failed to read mnode: %s", strerror(-ret));
+        rpma_buf_free(dcli->rpma_cli, mnode, dcli->cstrip_size);
+        mnode = ERR_PTR(ret);
+    }
+
+    ret = rpma_commit_sync(dcli->rpma_cli);
+    if (unlikely(ret < 0)) {
+        pr_err("failed to commit mnode read: %s", strerror(-ret));
+        rpma_buf_free(dcli->rpma_cli, mnode, dcli->cstrip_size);
+        mnode = ERR_PTR(ret);
+    }
+
+out:
+    return mnode;
+}
+
+static inline void cnode_put_mnode(dcli_t *dcli, struct mnode *mnode) {
+    size_t msize = sizeof(struct mnode) + dcli->cfanout * sizeof(uint8_t);
+    rpma_buf_free(dcli->rpma_cli, mnode, msize);
+}
+
 static int hnode_delete(dcli_t *dcli, size_t mnode_off, k_t key) {
     struct mnode *mnode;
     struct dnode *dnode;
@@ -360,7 +440,7 @@ static int hnode_delete(dcli_t *dcli, size_t mnode_off, k_t key) {
 
     /* if key exists */
     fgprt = get_fgprt(dcli, key);
-    for (idx = 0; idx < dcli->hfanout; idx++) {
+    for (idx = 0; idx < mnode->nr_ents; idx++) {
         if (mnode->fgprt[idx] == fgprt) {
             /* then do update */
             dnode->entries[idx].valp.rawp = TOMBSTONE;
@@ -386,7 +466,7 @@ static int hnode_lookup(dcli_t *dcli, size_t mnode_off, k_t key, uint64_t *valp)
 
     /* if key exists */
     fgprt = get_fgprt(dcli, key);
-    for (idx = 0; idx < dcli->hfanout; idx++) {
+    for (idx = 0; idx < mnode->nr_ents; idx++) {
         if (mnode->fgprt[idx] == fgprt) {
             *valp = dnode->entries[idx].valp.rawp;
             goto out;
@@ -411,20 +491,17 @@ static int hnode_upsert(dcli_t *dcli, size_t mnode_off, k_t key, uint64_t valp) 
 
     /* if key exists */
     fgprt = get_fgprt(dcli, key);
-    for (idx = 0; idx < dcli->hfanout; idx++) {
+    for (idx = 0; idx < mnode->nr_ents; idx++) {
         if (mnode->fgprt[idx] == fgprt) {
-            /* then do update */
+            /* then do update, and set @ref flag */
             dnode->entries[idx].valp.rawp = valp;
+            mnode->ref = true;
             goto out;
         }
     }
 
     /* find valid index */
-    for (idx = 0; idx < dcli->hfanout; idx++) {
-        if (mnode->fgprt[idx] == 0) {
-            break;
-        }
-    }
+    idx = mnode->nr_ents;
     if (unlikely(idx == dcli->hfanout)) {
         /* run out of hnode space, need split */
         ret = -ENOMEM;
@@ -434,6 +511,9 @@ static int hnode_upsert(dcli_t *dcli, size_t mnode_off, k_t key, uint64_t valp) 
     /* insert into it */
     dnode->entries[idx].valp.rawp = valp;
     mnode->fgprt[idx] = fgprt;
+
+    /* make the insertion visible */
+    WRITE_ONCE(mnode->nr_ents, mnode->nr_ents + 1);
 
 out:
     return ret;
@@ -453,7 +533,7 @@ static int *get_order_arr(dcli_t *dcli, int *nr, struct mnode *mnode, struct dno
     }
 
     *nr = 0;
-    for (i = 0; i < dcli->hfanout; i++) {
+    for (i = 0; i < mnode->nr_ents; i++) {
         if (mnode->fgprt[i]) {
             order[(*nr)++] = i;
         }
@@ -464,19 +544,18 @@ static int *get_order_arr(dcli_t *dcli, int *nr, struct mnode *mnode, struct dno
     return order;
 }
 
-static int hnode_split_median(dcli_t *dcli, size_t *new_hnode, k_t key, dhint_t hint) {
+static int hnode_split_median(dcli_t *dcli, dgroup_t dgroup, size_t *new_hnode, k_t key) {
     struct mnode *prev, *next, *mnode, *mleft, *mright;
     struct dnode *dnode, *dleft, *dright;
     struct fnode *fnode, *fleft, *fright;
     size_t left_off, right_off, base;
     int *order, nr, ret = 0, i, pos;
     k_t split_key, lfence, rfence;
-    struct free_hnode_info *info;
 
     /* get mnode and dnode address */
-    mnode = lpma_get_ptr(dcli->lpma_cli, hint.hints[0]);
-    dnode = lpma_get_ptr(dcli->lpma_cli, hint.hints[0] + dcli->hstrip_size);
-    fnode = lpma_get_ptr(dcli->lpma_cli, hint.hints[0] + dcli->hnode_size);
+    mnode = lpma_get_ptr(dcli->lpma_cli, dgroup.dnodes[0]);
+    dnode = lpma_get_ptr(dcli->lpma_cli, dgroup.dnodes[0] + dcli->hstrip_size);
+    fnode = lpma_get_ptr(dcli->lpma_cli, dgroup.dnodes[0] + dcli->hnode_size);
     prev = mnode->prev_off ? lpma_get_ptr(dcli->lpma_cli, mnode->prev_off) : NULL;
     next = mnode->next_off ? lpma_get_ptr(dcli->lpma_cli, mnode->next_off) : NULL;
 
@@ -522,6 +601,9 @@ static int hnode_split_median(dcli_t *dcli, size_t *new_hnode, k_t key, dhint_t 
         mright->fgprt[i - pos] = mnode->fgprt[order[i]];
         dright->entries[i - pos] = dnode->entries[order[i]];
     }
+    mleft->nr_ents = pos;
+    mright->nr_ents = nr - pos;
+    mleft->ref = mright->ref = false;
 
     /* write fences */
     fleft->lfence_len = fnode->lfence_len;
@@ -557,9 +639,15 @@ static int hnode_split_median(dcli_t *dcli, size_t *new_hnode, k_t key, dhint_t 
     lpma_persist(dcli->lpma_cli);
 
     /* make new hnode visible to upper layer */
-    if (dcli->chg_hint_cb) {
-        dcli->chg_hint_cb(dcli->priv, (dhint_t) { .hints = { left_off, hint.hints[1] } }, lfence, split_key);
-        dcli->chg_hint_cb(dcli->priv, (dhint_t) { .hints = { right_off, hint.hints[1] } }, split_key, rfence);
+    ret = dcli->gm_updator(dcli->priv, lfence, split_key, (dgroup_t) { { left_off, dgroup.dnodes[1] } });
+    if (unlikely(ret)) {
+        pr_err("failed to update dgroup map: %s", strerror(-ret));
+        goto out;
+    }
+    ret = dcli->gm_updator(dcli->priv, split_key, rfence, (dgroup_t) { { right_off, dgroup.dnodes[1] } });
+    if (unlikely(ret)) {
+        pr_err("failed to update dgroup map: %s", strerror(-ret));
+        goto out;
     }
 
     /* get the new hnode of key */
@@ -577,18 +665,21 @@ static int hnode_split_median(dcli_t *dcli, size_t *new_hnode, k_t key, dhint_t 
 
     /* TODO: GC old hnode */
 
+    /* update statistics */
+    dcli->dset->pm_utilization += 2 * (dcli->hnode_size + sizeof(struct fnode) + split_key.len);
+
 out:
     return ret;
 }
 
-int dset_upsert(dcli_t *dcli, k_t key, uint64_t valp, dhint_t hint) {
-    size_t hnode_off = hint.hints[0];
+int dset_upsert(dcli_t *dcli, dgroup_t dgroup, k_t key, uint64_t valp) {
+    size_t hnode_off = dgroup.dnodes[0];
     int ret;
 
     ret = hnode_upsert(dcli, hnode_off, key, valp);
     if (unlikely(ret == -ENOMEM)) {
         /* hnode full, split and retry */
-        ret = hnode_split_median(dcli, &hnode_off, key, hint);
+        ret = hnode_split_median(dcli, dgroup, &hnode_off, key);
         if (unlikely(ret)) {
             pr_err("hnode split failed: %s", strerror(-ret));
             goto out;
@@ -604,16 +695,16 @@ out:
     return ret;
 }
 
-int dset_delete(dcli_t *dcli, k_t key, dhint_t hint) {
-    return hnode_delete(dcli, hint.hints[0], key);
+int dset_delete(dcli_t *dcli, dgroup_t dgroup, k_t key) {
+    return hnode_delete(dcli, dgroup.dnodes[0], key);
 }
 
-int dset_lookup(dcli_t *dcli, k_t key, uint64_t *valp, dhint_t hint) {
-    return hnode_lookup(dcli, hint.hints[0], key, valp);
+int dset_lookup(dcli_t *dcli, dgroup_t dgroup, k_t key, uint64_t *valp) {
+    return hnode_lookup(dcli, dgroup.dnodes[0], key, valp);
 }
 
 int dset_create_valp(dcli_t *dcli, uint64_t *valp, k_t key, const void *val, size_t len) {
-    size_t off, persisted = 0, stage_len;
+    size_t off, persisted = 0, stage_len, ovf_len;
     struct valp vp;
     uint64_t data;
     int ret = 0;
@@ -634,8 +725,11 @@ int dset_create_valp(dcli_t *dcli, uint64_t *valp, k_t key, const void *val, siz
         }
     }
 
+    /* calculate key overflow length */
+    ovf_len = key.len - min(key.len, dcli->kc->typical_len);
+
     /* alloc value memory in local PM */
-    vp.off = off = lpma_alloc(dcli->lpma_cli, len + key.len);
+    vp.off = off = lpma_alloc(dcli->lpma_cli, len + ovf_len);
     bonsai_assert(off < (1ul << 48));
     if (unlikely(IS_ERR(off))) {
         ret = -ENOMEM;
@@ -656,14 +750,17 @@ int dset_create_valp(dcli_t *dcli, uint64_t *valp, k_t key, const void *val, siz
     }
 
     /* persist key overflow part */
-    if (key.len > dcli->kc->typical_len) {
-        lpma_wr_nc(dcli->lpma_cli, off, key.key + dcli->kc->typical_len, len - dcli->kc->typical_len);
+    if (ovf_len) {
+        lpma_wr_nc(dcli->lpma_cli, off, key.key + dcli->kc->typical_len, ovf_len);
         lpma_persist(dcli->lpma_cli);
     }
 
     vp.inline_val = 0;
     vp.is_lpm = 1;
     vp.len = len;
+
+    /* update statistics */
+    dcli->dset->pm_utilization += len + ovf_len;
 
 out:
     *valp = vp.rawp;
@@ -712,6 +809,157 @@ int dset_get_val(dcli_t *dcli, void *buf, int bufsz, uint64_t valp) {
     }
 
     ret = vp.is_lpm ? get_val_lpm(dcli, buf, bufsz, vp) : get_val_rpm(dcli, buf, bufsz, vp);
+
+out:
+    return ret;
+}
+
+size_t dset_get_pm_utilization(dcli_t *dcli) {
+    return dcli->dset->pm_utilization;
+}
+
+static inline size_t choose_gc_target(dcli_t *dcli) {
+    dset_t *dset = dcli->dset;
+    struct mnode *mnode;
+    size_t target;
+
+    /* choose GC target based on clock pLRU algorithm to find the least recently updated node */
+    target = dset->pivot_hnode;
+    mnode = lpma_get_ptr(dcli->lpma_cli, target);
+    while (mnode->ref) {
+        mnode->ref = false;
+        if (unlikely(mnode->next_off == NO_OFF)) {
+            target = dset->sentinel_hnode;
+        } else {
+            target = mnode->next_off;
+        }
+        mnode = lpma_get_ptr(dcli->lpma_cli, target);
+    }
+
+    return target;
+}
+
+/*
+ * ┌───────┐ ┌───────┐ ┌───────┐
+ * │       │ │       │ │       │
+ * │ hnode │ │ hnode │ │ hnode │
+ * │       │ │       │ │       │
+ * └───┬───┘ └───┬───┘ └───┬───┘
+ *     │         │         │
+ *     └─────────┼─────────┘ hardware gather
+ *               │
+ * ┌───────────┬─▼─────────────┐
+ * │┼──────────┤     cnode     │
+ * ││          │               │
+ * ││  used    │   available   │
+ * ││          │               │
+ * │┼──────────┤               │
+ * └───────────┴───────────────┘
+ *
+ *              ────────►
+ *                append-only (out-of-place)
+ */
+static inline int gc_hnodes(dcli_t *dcli) {
+    size_t target, cnode_off, dnode_start_off;
+    int ret, nr_gc_ents, nr_gc_hnodes;
+    struct mnode *hmnode, *cmnode;
+    k_t lfence, rfence;
+    rpma_buf_t *bufs;
+    dgroup_t dgroup;
+
+    /* choose GC target (strategy: the least recently updated node) */
+    target = choose_gc_target(dcli);
+    hmnode = lpma_get_ptr(dcli->lpma_cli, target);
+    lfence = get_hnode_lfence(dcli, hmnode);
+    rfence = get_hnode_rfence(dcli, hmnode);
+
+    /* get the corresponding cnode */
+    ret = dcli->gm_lookuper(dcli->priv, &dgroup, lfence);
+    if (unlikely(ret)) {
+        pr_err("failed to lookup dgroup map: %s", strerror(-ret));
+        goto out;
+    }
+    cnode_off = dgroup.dnodes[1];
+    cmnode = cnode_get_mnode(dcli, cnode_off);
+    if (unlikely(IS_ERR(cmnode))) {
+        pr_err("failed to get mnode: %s", strerror(-PTR_ERR(cmnode)));
+        ret = PTR_ERR(cmnode);
+        goto out;
+    }
+
+    /* allocate data buffer pointers */
+    bufs = calloc(dcli->dset->max_gc_prefetch + 1, sizeof(*bufs));
+    if (unlikely(!bufs)) {
+        pr_err("failed to allocate memory for data buffer pointers");
+        ret = -ENOMEM;
+        goto out;
+    }
+
+    /* get target hnodes (prefetch succeeding hnodes) and modify cmnode */
+    nr_gc_hnodes = nr_gc_ents = 0;
+
+    while (dgroup.dnodes[1] == cnode_off && nr_gc_ents + cmnode->nr_ents < dcli->cfanout) {
+        bufs[nr_gc_hnodes].start = (void *) hmnode + dcli->hstrip_size;
+        bufs[nr_gc_hnodes].size = sizeof_dentry(dcli) * hmnode->nr_ents;
+
+        memcpy(cmnode->fgprt + cmnode->nr_ents, hmnode->fgprt, sizeof(uint8_t) * hmnode->nr_ents);
+        cmnode->nr_ents += hmnode->nr_ents;
+
+        nr_gc_hnodes++;
+        nr_gc_ents += hmnode->nr_ents;
+    }
+
+    bufs[nr_gc_hnodes] = (rpma_buf_t) { NULL, 0 };
+
+    if (unlikely(nr_gc_hnodes == 0)) {
+        /* TODO: FIXME: handle cnode split case! */
+    }
+
+    /* write cnode data */
+    dnode_start_off = cnode_off + dcli->cstrip_size + cmnode->nr_ents * sizeof_dentry(dcli);
+    ret = rpma_wr_(dcli->rpma_cli, dnode_start_off, bufs, 0);
+    if (unlikely(ret < 0)) {
+        free(bufs);
+        pr_err("failed to GC data to cnode: %s", strerror(-ret));
+        goto out;
+    }
+
+    /* write cnode metadata */
+    ret = rpma_wr(dcli->rpma_cli, cnode_off, 0, cmnode, sizeof(*cmnode) + cmnode->nr_ents * sizeof(uint8_t));
+    if (unlikely(ret < 0)) {
+        free(bufs);
+        pr_err("failed to GC metadata to cnode: %s", strerror(-ret));
+        goto out;
+    }
+
+    /* commit remote changes and wait */
+    ret = rpma_commit_sync(dcli->rpma_cli);
+    if (unlikely(ret < 0)) {
+        free(bufs);
+        pr_err("failed to commit GC data to cnode");
+        goto out;
+    }
+
+    free(bufs);
+
+out:
+    return ret;
+}
+
+int dset_gc(dcli_t *dcli, size_t *gc_size) {
+    dset_t *dset = dcli->dset;
+    size_t start;
+    int ret = 0;
+
+    start = dset->pm_utilization;
+    while (dset->pm_utilization - start < *gc_size) {
+        /* repeatedly GC hnodes until enough GC size */
+        ret = gc_hnodes(dcli);
+        if (unlikely(ret)) {
+            pr_err("failed to GC hnodes: %s", strerror(-ret));
+            goto out;
+        }
+    }
 
 out:
     return ret;

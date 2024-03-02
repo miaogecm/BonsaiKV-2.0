@@ -14,6 +14,7 @@
 #include <sys/mman.h>
 #include <pthread.h>
 
+#include "atomic.h"
 #include "alloc.h"
 #include "list.h"
 #include "perf.h"
@@ -34,6 +35,7 @@
 
 #define MAX_CLI_NR_MRS  8
 
+#define OP_BUF_SIZE     (1 * 1024 * 1024ul)
 #define CLI_BUF_SIZE    (1 * 1024 * 1024ul)
 
 struct rpma_svr {
@@ -59,6 +61,9 @@ struct wr_list {
 
 struct rpma {
     const char *dev_ip, *host;
+
+    allocator_t *allocator;
+    bool allocator_created;
 };
 
 struct rpma_cli {
@@ -68,7 +73,7 @@ struct rpma_cli {
     struct ibv_pd *pd;
 
     struct ibv_mr *mrs[MAX_CLI_NR_MRS];
-    size_t cli_buf_used;
+    size_t op_buf_used;
     int nr_mrs;
 
     struct ibv_qp *qp;
@@ -81,7 +86,7 @@ struct rpma_cli {
     struct wr_list wr_list;
     int nr_cqe;
 
-    allocator_t *allocator;
+    allocator_t *cli_buf_allocator;
 };
 
 struct pdata {
@@ -485,6 +490,23 @@ out:
     return ret;
 }
 
+static inline int create_op_buf(rpma_cli_t *cli, size_t size) {
+    void *buf;
+    int ret;
+
+    buf = huge_page_alloc(size);
+    if (unlikely(!buf)) {
+        ret = -errno;
+        pr_err("failed to allocate memory for operand buffer: %s", strerror(-ret));
+        goto out;
+    }
+
+    ret = rpma_add_mr(cli, buf, size);
+
+out:
+    return ret;
+}
+
 rpma_t *rpma_create(const char *host, const char *dev_ip) {
     rpma_t *rpma;
 
@@ -646,6 +668,13 @@ rpma_cli_t *rpma_cli_create(rpma_t *rpma, perf_t *perf) {
     cli->strip_size = pdata.strip_size;
     cli->stripe_size = pdata.stripe_size;
 
+    ret = create_op_buf(cli, OP_BUF_SIZE);
+    if (unlikely(ret)) {
+        cli = ERR_PTR(ret);
+        pr_err("failed to create operand buffer: %s", strerror(-ret));
+        goto out_destroy_id;
+    }
+
     ret = create_cli_buf(cli, CLI_BUF_SIZE);
     if (unlikely(ret)) {
         cli = ERR_PTR(ret);
@@ -653,11 +682,20 @@ rpma_cli_t *rpma_cli_create(rpma_t *rpma, perf_t *perf) {
         goto out_destroy_id;
     }
 
-    cli->allocator = allocator_create(cli->size);
-    if (unlikely(IS_ERR(cli->allocator))) {
-        cli = ERR_PTR(cli->allocator);
-        pr_err("failed to create allocator: %s", strerror(-PTR_ERR(cli->allocator)));
+    cli->cli_buf_allocator = allocator_create(CLI_BUF_SIZE);
+    if (unlikely(IS_ERR(cli->cli_buf_allocator))) {
+        cli = ERR_PTR(cli->cli_buf_allocator);
+        pr_err("failed to create client buffer allocator: %s", strerror(-PTR_ERR(cli->cli_buf_allocator)));
         goto out_destroy_id;
+    }
+
+    if (cmpxchg2(&rpma->allocator_created, false, true)) {
+        rpma->allocator = allocator_create(cli->size);
+        if (unlikely(IS_ERR(rpma->allocator))) {
+            cli = ERR_PTR(rpma->allocator);
+            pr_err("failed to create RPMA allocator: %s", strerror(-PTR_ERR(rpma->allocator)));
+            goto out_destroy_id;
+        }
     }
 
     pr_debug(10, "rpma [%s] -> %s size=%lu,qpn=%d,rkey=%u)",
@@ -706,25 +744,42 @@ static inline struct ibv_mr *get_mr(rpma_cli_t *cli, void *addr, size_t size) {
     return NULL;
 }
 
+void *rpma_buf_alloc(rpma_cli_t *cli, size_t size) {
+    size_t off;
+
+    off = allocator_alloc(cli->cli_buf_allocator, size);
+    if (IS_ERR(off)) {
+        pr_err("failed to allocate memory for client buffer: %s", strerror(-PTR_ERR(off)));
+        return ERR_PTR(off);
+    }
+
+    return cli->mrs[1]->addr + off;
+}
+
+void rpma_buf_free(rpma_cli_t *cli, void *buf, size_t size) {
+    size_t off;
+
+    bonsai_assert(buf >= cli->mrs[1]->addr && buf < cli->mrs[1]->addr + cli->mrs[1]->length);
+
+    off = buf - cli->mrs[1]->addr;
+    allocator_free(cli->cli_buf_allocator, off, size);
+}
+
 static inline void *push_operand(rpma_cli_t *cli, void *start, size_t len) {
     void *p;
 
-    if (unlikely(cli->cli_buf_used + len > CLI_BUF_SIZE)) {
+    if (unlikely(cli->op_buf_used + len > OP_BUF_SIZE)) {
         return ERR_PTR(-ENOMEM);
     }
 
-    p = cli->mrs[0]->addr + cli->cli_buf_used;
-    cli->cli_buf_used += len;
+    p = cli->mrs[0]->addr + cli->op_buf_used;
+    cli->op_buf_used += len;
 
     if (start) {
         memcpy(p, start, len);
     }
 
     return p;
-}
-
-void *rpma_buf_alloc(rpma_cli_t *cli, size_t size) {
-    return push_operand(cli, NULL, size);
 }
 
 static inline void *get_operand(rpma_cli_t *cli, uint32_t *lkey, void *start, size_t len) {
@@ -737,6 +792,7 @@ static inline void *get_operand(rpma_cli_t *cli, uint32_t *lkey, void *start, si
         goto out;
     }
 
+    /* TODO: copy for read ops */
     operand = push_operand(cli, start, len);
     if (unlikely(IS_ERR(operand))) {
         goto out_err;
@@ -748,10 +804,6 @@ out:
 
 out_err:
     return operand;
-}
-
-static inline void clear_cli_buf(rpma_cli_t *cli) {
-    cli->cli_buf_used = 0;
 }
 
 static inline struct ibv_sge *get_sg_list(rpma_cli_t *cli, rpma_buf_t *buf, int *nr) {
@@ -930,18 +982,18 @@ int rpma_sync(rpma_cli_t *cli) {
     } while (total < cli->nr_cqe);
 
     cli->nr_cqe = 0;
-    clear_cli_buf(cli);
+    cli->op_buf_used = 0;
 
 out:
     return ret;
 }
 
 size_t rpma_alloc(rpma_cli_t *cli, size_t size) {
-    return allocator_alloc(cli->allocator, size);
+    return allocator_alloc(cli->rpma->allocator, size);
 }
 
 void rpma_free(rpma_cli_t *cli, size_t off, size_t size) {
-    return allocator_free(cli->allocator, off, size);
+    return allocator_free(cli->rpma->allocator, off, size);
 }
 
 size_t rpma_get_strip_size(rpma_cli_t *cli) {
