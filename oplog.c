@@ -435,7 +435,6 @@ out:
     return op;
 }
 
-
 void logger_destroy_barrier(logger_barrier_t *barrier) {
     struct logger_cli_barrier *cb;
     int i;
