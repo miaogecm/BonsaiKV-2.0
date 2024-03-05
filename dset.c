@@ -12,6 +12,8 @@
 
 #define _GNU_SOURCE
 
+#define DSET_SOURCE
+
 #include <urcu.h>
 
 #include "atomic.h"
@@ -41,6 +43,21 @@ struct valp {
     };
 };
 
+struct nodep {
+    union {
+        struct {
+            int dom : 16;
+            uint64_t off : 48;
+        };
+        uint64_t rawp;
+    };
+};
+
+typedef struct dgroup {
+    /* dnodes across different storage tiers */
+    struct nodep dnodes[2];
+} dgroup_t;
+
 struct dentry {
     struct valp valp;
     uint32_t k_len;
@@ -67,13 +84,15 @@ struct fnode {
 struct dset {
     kc_t *kc;
 
-    size_t sentinel_hnode, sentinel_cnode;
+    struct nodep sentinel_hnode, sentinel_cnode;
     bool sentinel_created;
 
     size_t hnode_size, cnode_size;
 
-    lpma_t *lpma;
-    rpma_t *rpma;
+    int nr_ldoms, nr_rdoms;
+    lpma_t **dom_lpmas;
+    rpma_t **dom_rpmas;
+    rpma_t *rep_rpma;
 
     size_t pstage_sz;
 
@@ -91,8 +110,9 @@ struct dcli {
     dgroup_map_update_fn gm_updator;
     void *priv;
 
-    rpma_cli_t *rpma_cli;
-    lpma_cli_t *lpma_cli;
+    rpma_cli_t **dom_rpma_clis;
+    lpma_cli_t **dom_lpma_clis;
+    rpma_cli_t *rep_rpma_cli;
     perf_t *perf;
     kc_t *kc;
 
@@ -106,7 +126,7 @@ struct dcli {
 /*
  * Remote Memory Layout
  *
- *  Node0 RPMA        Node1 RPMA         Repl RPMA
+ *  Dom0 RPMA          Dom1 RPMA         Rep RPMA
  * ┌─────────────┐   ┌─────────────┐   ┌─────────────┐
  * │$$$$$$$$$$$$$│   │$$$$$$$$$$$$$│   │$$$$$$$$$$$$$│
  * │    dev0     │   │    dev1     │   │    dev0     │
@@ -150,13 +170,21 @@ struct dcli {
  * └─────────────┘   └─────────────┘   └─────────────┘
  */
 dset_t *dset_create(kc_t *kc, size_t hnode_size, size_t cnode_size,
-                    lpma_t *lpma, rpma_t *rpma, size_t pstage_sz,
-                    int max_gc_prefetch) {
+                    lpma_t **dom_lpmas, rpma_t **dom_rpmas, rpma_t *rep_rpma,
+                    size_t pstage_sz, int max_gc_prefetch) {
     dset_t *dset;
+    int i;
+
+    if (unlikely(!dom_lpmas[0] || !dom_rpmas[0])) {
+        dset = ERR_PTR(-EINVAL);
+        pr_err("empty lpmas or rpmas");
+        goto out;
+    }
 
     dset = calloc(1, sizeof(*dset));
     if (unlikely(!dset)) {
         dset = ERR_PTR(-ENOMEM);
+        pr_err("failed to alloc memory for dset struct");
         goto out;
     }
 
@@ -165,8 +193,26 @@ dset_t *dset_create(kc_t *kc, size_t hnode_size, size_t cnode_size,
     dset->hnode_size = hnode_size;
     dset->cnode_size = cnode_size;
 
-    dset->lpma = lpma;
-    dset->rpma = rpma;
+    while (dom_lpmas[dset->nr_ldoms]) {
+        dset->nr_ldoms++;
+    }
+    while (dom_rpmas[dset->nr_rdoms]) {
+        dset->nr_rdoms++;
+    }
+    dset->dom_lpmas = calloc(dset->nr_ldoms, sizeof(*dom_lpmas));
+    dset->dom_rpmas = calloc(dset->nr_rdoms, sizeof(*dom_rpmas));
+    if (unlikely(!dset->dom_lpmas || !dset->dom_rpmas)) {
+        dset = ERR_PTR(-ENOMEM);
+        pr_err("failed to alloc memory for dom_pmas");
+        goto out;
+    }
+    for (i = 0; i < dset->nr_ldoms; i++) {
+        dset->dom_lpmas[i] = dom_lpmas[i];
+    }
+    for (i = 0; i < dset->nr_rdoms; i++) {
+        dset->dom_rpmas[i] = dom_rpmas[i];
+    }
+    dset->rep_rpma = rep_rpma;
 
     dset->pstage_sz = pstage_sz;
 
@@ -186,7 +232,7 @@ static inline uint8_t get_fgprt(dcli_t *dcli, k_t k) {
     return k_hash(dcli->kc, k) & 0xff;
 }
 
-static inline int cmp_dentry(dcli_t *dcli, const struct dentry *d1, const struct dentry *d2) {
+static inline int cmp_dentry(dcli_t *dcli, int dom, const struct dentry *d1, const struct dentry *d2) {
     size_t embed_len1 = min(d1->k_len, dcli->kc->typical_len), embed_len2 = min(d2->k_len, dcli->kc->typical_len);
     size_t ovf_len1 = d1->k_len - embed_len1, ovf_len2 = d2->k_len - embed_len2;
     char *o1, *o2;
@@ -207,12 +253,12 @@ static inline int cmp_dentry(dcli_t *dcli, const struct dentry *d1, const struct
     }
 
     /* both has overflow part */
-    o1 = lpma_get_ptr(dcli->lpma_cli, d1->valp.off + d1->valp.len);
-    o2 = lpma_get_ptr(dcli->lpma_cli, d2->valp.off + d2->valp.len);
+    o1 = lpma_get_ptr(dcli->dom_lpma_clis[dom], d1->valp.off + d1->valp.len);
+    o2 = lpma_get_ptr(dcli->dom_lpma_clis[dom], d2->valp.off + d2->valp.len);
     return memncmp(o1, ovf_len1, o2, ovf_len2);
 }
 
-static inline char *get_dentry_key(dcli_t *dcli, const struct dentry *de) {
+static inline char *get_dentry_key(dcli_t *dcli, int dom, const struct dentry *de) {
     size_t ovf_off, ovf_len;
     char *key;
 
@@ -229,7 +275,7 @@ static inline char *get_dentry_key(dcli_t *dcli, const struct dentry *de) {
     ovf_off = de->valp.off + de->valp.len;
     ovf_len = de->k_len - dcli->kc->typical_len;
     memcpy(key, de->dkey, dcli->kc->typical_len);
-    lpma_rd(dcli->lpma_cli, key + dcli->kc->typical_len, ovf_off, ovf_len);
+    lpma_rd(dcli->dom_lpma_clis[dom], key + dcli->kc->typical_len, ovf_off, ovf_len);
 
     return key;
 }
@@ -256,8 +302,8 @@ static inline k_t get_hnode_rfence(dcli_t *dcli, struct mnode *mnode) {
 }
 
 static inline int create_sentinel(dcli_t *dcli) {
+    size_t msize, fsize, hoff, coff;
     dset_t *dset = dcli->dset;
-    size_t msize, fsize;
     struct mnode *mnode;
     struct fnode *fnode;
     dgroup_t dgroup;
@@ -266,18 +312,21 @@ static inline int create_sentinel(dcli_t *dcli) {
     fsize = sizeof(struct fnode) + dcli->kc->min.len + dcli->kc->max.len;
 
     /* alloc sentinel memory */
-    dset->sentinel_hnode = lpma_alloc(dcli->lpma_cli, dcli->hnode_size + fsize);
-    dset->sentinel_cnode = rpma_alloc(dcli->rpma_cli, dcli->cnode_size + fsize);
-    if (unlikely(IS_ERR(dset->sentinel_hnode) || IS_ERR(dset->sentinel_cnode))) {
+    hoff = lpma_alloc(dcli->dom_lpma_clis[0], dcli->hnode_size + fsize);
+    coff = rpma_alloc(dcli->dom_rpma_clis[0], dcli->cnode_size + fsize);
+    if (unlikely(IS_ERR(hoff) || IS_ERR(coff))) {
         pr_err("failed to allocate sentinel hnode / cnode: %s / %s",
-               strerror(-PTR_ERR(dset->sentinel_hnode)), strerror(-PTR_ERR(dset->sentinel_cnode)));
+               strerror(-PTR_ERR(hoff)), strerror(-PTR_ERR(coff)));
         ret = -ENOMEM;
         goto out;
     }
+    dset->sentinel_hnode.dom = dset->sentinel_cnode.dom = 0;
+    dset->sentinel_hnode.off = hoff;
+    dset->sentinel_cnode.off = coff;
 
     /* init hnode sentinel */
-    mnode = lpma_get_ptr(dcli->lpma_cli, dset->sentinel_hnode);
-    fnode = lpma_get_ptr(dcli->lpma_cli, dset->sentinel_hnode + dcli->hnode_size);
+    mnode = lpma_get_ptr(dcli->dom_lpma_clis[0], hoff);
+    fnode = lpma_get_ptr(dcli->dom_lpma_clis[0], hoff + dcli->hnode_size);
     msize = sizeof(*mnode) + dcli->hfanout * sizeof(uint8_t);
     memset(mnode, 0, msize);
     mnode->prev_off = mnode->next_off = NO_OFF;
@@ -285,12 +334,12 @@ static inline int create_sentinel(dcli_t *dcli) {
     fnode->rfence_len = dcli->kc->max.len;
     memcpy(fnode->fences, dcli->kc->min.key, dcli->kc->min.len);
     memcpy(fnode->fences + dcli->kc->min.len, dcli->kc->max.key, dcli->kc->max.len);
-    lpma_flush(dcli->lpma_cli, dset->sentinel_hnode, msize);
-    lpma_flush(dcli->lpma_cli, dset->sentinel_hnode + dcli->hnode_size, fsize);
-    lpma_persist(dcli->lpma_cli);
+    lpma_flush(dcli->dom_lpma_clis[0], hoff, msize);
+    lpma_flush(dcli->dom_lpma_clis[0], hoff + dcli->hnode_size, fsize);
+    lpma_persist(dcli->dom_lpma_clis[0]);
 
     /* init cnode sentinel */
-    mnode = rpma_buf_alloc(dcli->rpma_cli, msize);
+    mnode = rpma_buf_alloc(dcli->dom_rpma_clis[0], msize);
     if (unlikely(!mnode)) {
         pr_err("failed to allocate memory for cnode sentinel");
         ret = -ENOMEM;
@@ -301,22 +350,22 @@ static inline int create_sentinel(dcli_t *dcli) {
     mnode->prev_off = mnode->next_off = NO_OFF;
 
     /* write back cnode sentinel */
-    ret = rpma_wr(dcli->rpma_cli, dset->sentinel_cnode, 0, mnode, msize);
+    ret = rpma_wr(dcli->dom_rpma_clis[0], coff, 0, mnode, msize);
     if (unlikely(ret < 0)) {
         pr_err("failed to write cnode sentinel: %s", strerror(-ret));
         goto out;
     }
-    ret = rpma_wr(dcli->rpma_cli, dset->sentinel_cnode + dset->cnode_size, 0, fnode, fsize);
+    ret = rpma_wr(dcli->dom_rpma_clis[0], coff + dset->cnode_size, 0, fnode, fsize);
     if (unlikely(ret < 0)) {
         pr_err("failed to write cnode sentinel: %s", strerror(-ret));
         goto out;
     }
-    ret = rpma_commit_sync(dcli->rpma_cli);
+    ret = rpma_commit_sync(dcli->dom_rpma_clis[0]);
     if (unlikely(ret < 0)) {
         pr_err("failed to commit cnode sentinel: %s", strerror(-ret));
     }
 
-    rpma_buf_free(dcli->rpma_cli, mnode, msize);
+    rpma_buf_free(dcli->dom_rpma_clis[0], mnode, msize);
 
     /* init dgroup map */
     dgroup.dnodes[0] = dset->sentinel_hnode;
@@ -336,9 +385,9 @@ out:
 
 dcli_t *dcli_create(dset_t *dset, dgroup_map_update_fn gm_updator, dgroup_map_lookup_fn gm_lookuper,
                     void *priv, perf_t *perf) {
-    size_t hstripe_size, cstripe_size;
+    size_t hstripe_size = UINT64_MAX, cstripe_size = UINT64_MAX;
     dcli_t *dcli;
-    int ret;
+    int ret, i;
 
     dcli = calloc(1, sizeof(*dcli));
     if (unlikely(!dcli)) {
@@ -353,22 +402,67 @@ dcli_t *dcli_create(dset_t *dset, dgroup_map_update_fn gm_updator, dgroup_map_lo
     dcli->priv = priv;
 
     dcli->perf = perf;
-    dcli->rpma_cli = rpma_cli_create(dset->rpma, perf);
-    dcli->lpma_cli = lpma_cli_create(dset->lpma, perf);
-    if (unlikely(IS_ERR(dcli->rpma_cli) || IS_ERR(dcli->lpma_cli))) {
-        dcli = ERR_PTR(-ENOMEM);
-        pr_err("failed to create rpma_cli / lpma_cli: %s / %s",
-               strerror(-PTR_ERR(dcli->rpma_cli)), strerror(-PTR_ERR(dcli->lpma_cli)));
+
+    for (i = 0; i < dset->nr_ldoms; i++) {
+        dcli->dom_lpma_clis[i] = lpma_cli_create(dset->dom_lpmas[i], perf);
+        if (unlikely(IS_ERR(dcli->dom_lpma_clis[i]))) {
+            pr_err("failed to create dom_lpma_cli: %s", strerror(-PTR_ERR(dcli->dom_lpma_clis[i])));
+            ret = PTR_ERR(dcli->dom_lpma_clis[i]);
+            free(dcli);
+            dcli = ERR_PTR(ret);
+            goto out;
+        }
+        if (hstripe_size == UINT64_MAX) {
+            hstripe_size = lpma_get_stripe_size(dcli->dom_lpma_clis[i]);
+        }
+        if (unlikely(hstripe_size != lpma_get_stripe_size(dcli->dom_lpma_clis[i]))) {
+            pr_err("inconsistent stripe size across ldoms");
+            ret = -EINVAL;
+            free(dcli);
+            dcli = ERR_PTR(ret);
+            goto out;
+        }
+    }
+    for (i = 0; i < dset->nr_rdoms; i++) {
+        dcli->dom_rpma_clis[i] = rpma_cli_create(dset->dom_rpmas[i], perf);
+        if (unlikely(IS_ERR(dcli->dom_rpma_clis[i]))) {
+            pr_err("failed to create dom_rpma_cli: %s", strerror(-PTR_ERR(dcli->dom_rpma_clis[i])));
+            ret = PTR_ERR(dcli->dom_rpma_clis[i]);
+            free(dcli);
+            dcli = ERR_PTR(ret);
+            goto out;
+        }
+        if (cstripe_size == UINT64_MAX) {
+            cstripe_size = rpma_get_stripe_size(dcli->dom_rpma_clis[i]);
+        }
+        if (unlikely(cstripe_size != rpma_get_stripe_size(dcli->dom_rpma_clis[i]))) {
+            pr_err("inconsistent stripe size across rdoms");
+            ret = -EINVAL;
+            free(dcli);
+            dcli = ERR_PTR(ret);
+            goto out;
+        }
+    }
+    dcli->rep_rpma_cli = rpma_cli_create(dset->rep_rpma, perf);
+    if (unlikely(IS_ERR(dcli->rep_rpma_cli))) {
+        pr_err("failed to create rep_rpma_cli: %s", strerror(-PTR_ERR(dcli->rep_rpma_cli)));
+        ret = PTR_ERR(dcli->rep_rpma_cli);
+        free(dcli);
+        dcli = ERR_PTR(ret);
+        goto out;
+    }
+    if (unlikely(cstripe_size != rpma_get_stripe_size(dcli->rep_rpma_cli))) {
+        pr_err("inconsistent stripe size between rep_rpma and dom_rpma");
+        ret = -EINVAL;
+        free(dcli);
+        dcli = ERR_PTR(ret);
         goto out;
     }
 
     dcli->kc = dset->kc;
 
-    hstripe_size = lpma_get_stripe_size(dcli->lpma_cli);
-    cstripe_size = rpma_get_stripe_size(dcli->rpma_cli);
-
-    dcli->hstrip_size = lpma_get_strip_size(dcli->lpma_cli);
-    dcli->cstrip_size = rpma_get_strip_size(dcli->rpma_cli);
+    dcli->hstrip_size = hstripe_size;
+    dcli->cstrip_size = cstripe_size;
 
     if (unlikely(dset->hnode_size < hstripe_size)) {
         pr_err("hnode size %lu is smaller than stripe size %lu", dset->hnode_size, hstripe_size);
@@ -438,30 +532,30 @@ void dcli_destroy(dcli_t *dcli) {
     free(dcli);
 }
 
-static inline struct mnode *cnode_get_mnode(dcli_t *dcli, size_t cnode_off) {
+static inline struct mnode *cnode_get_mnode(dcli_t *dcli, struct nodep cnode) {
     struct mnode *mnode;
     size_t msize;
     int ret;
 
     msize = sizeof(struct mnode) + dcli->cfanout * sizeof(uint8_t);
 
-    mnode = rpma_buf_alloc(dcli->rpma_cli, msize);
+    mnode = rpma_buf_alloc(dcli->dom_rpma_clis[cnode.dom], msize);
     if (unlikely(IS_ERR(mnode))) {
         pr_err("failed to allocate memory for mnode: %s", strerror(-PTR_ERR(mnode)));
         goto out;
     }
 
-    ret = rpma_rd(dcli->rpma_cli, cnode_off, 0, mnode, msize);
+    ret = rpma_rd(dcli->dom_rpma_clis[cnode.dom], cnode.off, 0, mnode, msize);
     if (unlikely(ret < 0)) {
         pr_err("failed to read mnode: %s", strerror(-ret));
-        rpma_buf_free(dcli->rpma_cli, mnode, dcli->cstrip_size);
+        rpma_buf_free(dcli->dom_rpma_clis[cnode.dom], mnode, dcli->cstrip_size);
         mnode = ERR_PTR(ret);
     }
 
-    ret = rpma_commit_sync(dcli->rpma_cli);
+    ret = rpma_commit_sync(dcli->dom_rpma_clis[cnode.dom]);
     if (unlikely(ret < 0)) {
         pr_err("failed to commit mnode read: %s", strerror(-ret));
-        rpma_buf_free(dcli->rpma_cli, mnode, dcli->cstrip_size);
+        rpma_buf_free(dcli->dom_rpma_clis[cnode.dom], mnode, dcli->cstrip_size);
         mnode = ERR_PTR(ret);
     }
 
@@ -469,20 +563,20 @@ out:
     return mnode;
 }
 
-static inline void cnode_put_mnode(dcli_t *dcli, struct mnode *mnode) {
+static inline void cnode_put_mnode(dcli_t *dcli, struct nodep cnode, struct mnode *mnode) {
     size_t msize = sizeof(struct mnode) + dcli->cfanout * sizeof(uint8_t);
-    rpma_buf_free(dcli->rpma_cli, mnode, msize);
+    rpma_buf_free(dcli->dom_rpma_clis[cnode.dom], mnode, msize);
 }
 
-static int hnode_delete(dcli_t *dcli, size_t mnode_off, k_t key) {
+static int hnode_delete(dcli_t *dcli, struct nodep hnode, k_t key) {
     struct mnode *mnode;
     struct dnode *dnode;
     int idx, ret = 0;
     uint64_t fgprt;
 
     /* get mnode and dnode address */
-    mnode = lpma_get_ptr(dcli->lpma_cli, mnode_off);
-    dnode = lpma_get_ptr(dcli->lpma_cli, mnode_off + dcli->hstrip_size);
+    mnode = lpma_get_ptr(dcli->dom_lpma_clis[hnode.dom], hnode.off);
+    dnode = lpma_get_ptr(dcli->dom_lpma_clis[hnode.dom], hnode.off + dcli->hstrip_size);
 
     /* if key exists */
     fgprt = get_fgprt(dcli, key);
@@ -500,15 +594,15 @@ out:
     return ret;
 }
 
-static int hnode_lookup(dcli_t *dcli, size_t mnode_off, k_t key, uint64_t *valp) {
+static int hnode_lookup(dcli_t *dcli, struct nodep hnode, k_t key, uint64_t *valp) {
     struct mnode *mnode;
     struct dnode *dnode;
     int idx, ret = 0;
     uint64_t fgprt;
 
     /* get mnode and dnode address */
-    mnode = lpma_get_ptr(dcli->lpma_cli, mnode_off);
-    dnode = lpma_get_ptr(dcli->lpma_cli, mnode_off + dcli->hstrip_size);
+    mnode = lpma_get_ptr(dcli->dom_lpma_clis[hnode.dom], hnode.off);
+    dnode = lpma_get_ptr(dcli->dom_lpma_clis[hnode.dom], hnode.off + dcli->hstrip_size);
 
     /* if key exists */
     fgprt = get_fgprt(dcli, key);
@@ -525,15 +619,15 @@ out:
     return ret;
 }
 
-static int hnode_upsert(dcli_t *dcli, size_t mnode_off, k_t key, uint64_t valp) {
+static int hnode_upsert(dcli_t *dcli, struct nodep hnode, k_t key, uint64_t valp) {
     struct mnode *mnode;
     struct dnode *dnode;
     int idx, ret = 0;
     uint64_t fgprt;
 
     /* get mnode and dnode address */
-    mnode = lpma_get_ptr(dcli->lpma_cli, mnode_off);
-    dnode = lpma_get_ptr(dcli->lpma_cli, mnode_off + dcli->hstrip_size);
+    mnode = lpma_get_ptr(dcli->dom_lpma_clis[hnode.dom], hnode.off);
+    dnode = lpma_get_ptr(dcli->dom_lpma_clis[hnode.dom], hnode.off + dcli->hstrip_size);
 
     /* if key exists */
     fgprt = get_fgprt(dcli, key);
@@ -565,12 +659,18 @@ out:
     return ret;
 }
 
+struct sort_task {
+    dcli_t *dcli;
+    int dom;
+};
+
 static int sort_cmp_dentry(const void *a, const void *b, void *priv) {
-    dcli_t *dcli = priv;
-    return cmp_dentry(dcli, a, b);
+    struct sort_task *task = priv;
+    return cmp_dentry(task->dcli, task->dom, a, b);
 }
 
-static int *get_order_arr(dcli_t *dcli, int *nr, struct mnode *mnode, struct dnode *dnode) {
+static int *get_order_arr(dcli_t *dcli, int *nr, struct nodep hnode, struct mnode *mnode, struct dnode *dnode) {
+    struct sort_task task;
     int i, *order;
 
     order = calloc(dcli->hfanout, sizeof(*order));
@@ -585,7 +685,9 @@ static int *get_order_arr(dcli_t *dcli, int *nr, struct mnode *mnode, struct dno
         }
     }
 
-    qsort_r(order, *nr, sizeof(*order), sort_cmp_dentry, dcli);
+    task.dcli = dcli;
+    task.dom = hnode.dom;
+    qsort_r(order, *nr, sizeof(*order), sort_cmp_dentry, &task);
 
     return order;
 }
