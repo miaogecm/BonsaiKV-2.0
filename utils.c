@@ -8,6 +8,8 @@
 
 #define _GNU_SOURCE
 
+#include <fcntl.h>
+
 #include "utils.h"
 
 int debug_level;
@@ -65,4 +67,25 @@ void dump_stack() {
     struct backtrace_state *state = backtrace_create_state(NULL, BACKTRACE_SUPPORTS_THREADS, bt_err_cb, NULL);
     pr_info(PT_BOLD "========== dump stack ==========" PT_RESET);
     backtrace_full(state, 0, bt_full_cb, bt_err_cb, NULL);
+}
+
+unsigned int get_rand_seed() {
+    unsigned int seed;
+    int fd, err;
+
+    fd = open("/dev/urandom", O_RDONLY);
+    if (fd < 0) {
+        pr_err("open /dev/urandom failed");
+        exit(EXIT_FAILURE);
+    }
+
+    err = read(fd, &seed, sizeof(seed));
+    if (err < 0) {
+        pr_err("read /dev/urandom failed");
+        exit(EXIT_FAILURE);
+    }
+
+    close(fd);
+
+    return seed;
 }

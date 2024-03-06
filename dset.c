@@ -110,9 +110,11 @@ struct dcli {
     dgroup_map_update_fn gm_updator;
     void *priv;
 
+    int nr_ldoms, nr_rdoms;
     rpma_cli_t **dom_rpma_clis;
     lpma_cli_t **dom_lpma_clis;
     rpma_cli_t *rep_rpma_cli;
+
     perf_t *perf;
     kc_t *kc;
 
@@ -121,6 +123,8 @@ struct dcli {
     int hfanout, cfanout;
 
     size_t pstage_sz;
+
+    unsigned seed;
 };
 
 /*
@@ -403,6 +407,8 @@ dcli_t *dcli_create(dset_t *dset, dgroup_map_update_fn gm_updator, dgroup_map_lo
 
     dcli->perf = perf;
 
+    dcli->nr_ldoms = dset->nr_ldoms;
+    dcli->nr_rdoms = dset->nr_rdoms;
     for (i = 0; i < dset->nr_ldoms; i++) {
         dcli->dom_lpma_clis[i] = lpma_cli_create(dset->dom_lpmas[i], perf);
         if (unlikely(IS_ERR(dcli->dom_lpma_clis[i]))) {
@@ -692,23 +698,25 @@ static int *get_order_arr(dcli_t *dcli, int *nr, struct nodep hnode, struct mnod
     return order;
 }
 
-static int hnode_split_median(dcli_t *dcli, dgroup_t dgroup, size_t *new_hnode, k_t key) {
+static int hnode_split_median(dcli_t *dcli, dgroup_t dgroup, struct nodep *new_hnode, k_t key) {
     struct mnode *prev, *next, *mnode, *mleft, *mright;
+    int *order, nr, ret = 0, i, pos, dom, ddom;
     struct dnode *dnode, *dleft, *dright;
     struct fnode *fnode, *fleft, *fright;
     size_t left_off, right_off, base;
-    int *order, nr, ret = 0, i, pos;
     k_t split_key, lfence, rfence;
 
+    dom = dgroup.dnodes[0].dom;
+
     /* get mnode and dnode address */
-    mnode = lpma_get_ptr(dcli->lpma_cli, dgroup.dnodes[0]);
-    dnode = lpma_get_ptr(dcli->lpma_cli, dgroup.dnodes[0] + dcli->hstrip_size);
-    fnode = lpma_get_ptr(dcli->lpma_cli, dgroup.dnodes[0] + dcli->hnode_size);
-    prev = mnode->prev_off ? lpma_get_ptr(dcli->lpma_cli, mnode->prev_off) : NULL;
-    next = mnode->next_off ? lpma_get_ptr(dcli->lpma_cli, mnode->next_off) : NULL;
+    mnode = lpma_get_ptr(dcli->dom_lpma_clis[dom], dgroup.dnodes[0].off);
+    dnode = lpma_get_ptr(dcli->dom_lpma_clis[dom], dgroup.dnodes[0].off + dcli->hstrip_size);
+    fnode = lpma_get_ptr(dcli->dom_lpma_clis[dom], dgroup.dnodes[0].off + dcli->hnode_size);
+    prev = mnode->prev_off ? lpma_get_ptr(dcli->dom_lpma_clis[dom], mnode->prev_off) : NULL;
+    next = mnode->next_off ? lpma_get_ptr(dcli->dom_lpma_clis[dom], mnode->next_off) : NULL;
 
     /* get order array */
-    order = get_order_arr(dcli, &nr, mnode, dnode);
+    order = get_order_arr(dcli, &nr, dgroup.dnodes[0], mnode, dnode);
     if (unlikely(!order)) {
         ret = -ENOMEM;
         goto out;
@@ -716,27 +724,26 @@ static int hnode_split_median(dcli_t *dcli, dgroup_t dgroup, size_t *new_hnode, 
 
     /* get split key */
     pos = nr / 2;
-    split_key.key = get_dentry_key(dcli, &dnode->entries[order[pos]]);
+    split_key.key = get_dentry_key(dcli, dom, &dnode->entries[order[pos]]);
     split_key.len = dnode->entries[order[pos]].k_len;
 
     /* create new mnodes */
     base = dcli->hnode_size + sizeof(struct fnode) + split_key.len;
-    left_off = lpma_alloc(dcli->lpma_cli, base + fnode->lfence_len);
-    right_off = lpma_alloc(dcli->lpma_cli, base + fnode->rfence_len);
-
-    right_off = lpma_alloc(dcli->lpma_cli, dcli->hnode_size);
+    left_off = lpma_alloc(dcli->dom_lpma_clis[0], base + fnode->lfence_len);
+    right_off = lpma_alloc(dcli->dom_lpma_clis[0], base + fnode->rfence_len);
     if (unlikely(IS_ERR(left_off) || IS_ERR(right_off))) {
         pr_err("failed to allocate memory for new mnodes: %s / %s",
                strerror(-PTR_ERR(left_off)), strerror(-PTR_ERR(right_off)));
         ret = -ENOMEM;
         goto out;
     }
-    mleft = lpma_get_ptr(dcli->lpma_cli, left_off);
-    mright = lpma_get_ptr(dcli->lpma_cli, right_off);
-    dleft = lpma_get_ptr(dcli->lpma_cli, left_off + dcli->hstrip_size);
-    dright = lpma_get_ptr(dcli->lpma_cli, right_off + dcli->hstrip_size);
-    fleft = lpma_get_ptr(dcli->lpma_cli, left_off + dcli->hnode_size);
-    fright = lpma_get_ptr(dcli->lpma_cli, right_off + dcli->hnode_size);
+    ddom = rand_r(&dcli->seed) % dcli->dset->nr_ldoms;
+    mleft = lpma_get_ptr(dcli->dom_lpma_clis[ddom], left_off);
+    mright = lpma_get_ptr(dcli->dom_lpma_clis[ddom], right_off);
+    dleft = lpma_get_ptr(dcli->dom_lpma_clis[ddom], left_off + dcli->hstrip_size);
+    dright = lpma_get_ptr(dcli->dom_lpma_clis[ddom], right_off + dcli->hstrip_size);
+    fleft = lpma_get_ptr(dcli->dom_lpma_clis[ddom], left_off + dcli->hnode_size);
+    fright = lpma_get_ptr(dcli->dom_lpma_clis[ddom], right_off + dcli->hnode_size);
 
     /* write new fingerprint and data */
     memset(mleft->fgprt, 0, dcli->hfanout);
@@ -770,29 +777,31 @@ static int hnode_split_median(dcli_t *dcli, dgroup_t dgroup, size_t *new_hnode, 
     mleft->next_off = right_off;
     mright->prev_off = left_off;
     mright->next_off = mnode->next_off;
-    lpma_flush(dcli->lpma_cli, left_off, dcli->hnode_size);
-    lpma_flush(dcli->lpma_cli, right_off, dcli->hnode_size);
+    lpma_flush(dcli->dom_lpma_clis[ddom], left_off, dcli->hnode_size);
+    lpma_flush(dcli->dom_lpma_clis[ddom], right_off, dcli->hnode_size);
     if (next) {
         next->prev_off = right_off;
     }
-    lpma_persist(dcli->lpma_cli);
+    lpma_persist(dcli->dom_lpma_clis[ddom]);
 
     /* persist the link, this is the durable point of this split */
     if (prev) {
         WRITE_ONCE(prev->next_off, left_off);
-        lpma_flush(dcli->lpma_cli, mnode->prev_off, sizeof(*prev));
+        lpma_flush(dcli->dom_lpma_clis[ddom], mnode->prev_off, sizeof(*prev));
     } else {
         /* TODO: FIXME */
     }
-    lpma_persist(dcli->lpma_cli);
+    lpma_persist(dcli->dom_lpma_clis[ddom]);
 
     /* make new hnode visible to upper layer */
-    ret = dcli->gm_updator(dcli->priv, lfence, split_key, (dgroup_t) { { left_off, dgroup.dnodes[1] } });
+    dgroup.dnodes[0] = (struct nodep) { ddom, left_off };
+    ret = dcli->gm_updator(dcli->priv, lfence, split_key, dgroup);
     if (unlikely(ret)) {
         pr_err("failed to update dgroup map: %s", strerror(-ret));
         goto out;
     }
-    ret = dcli->gm_updator(dcli->priv, split_key, rfence, (dgroup_t) { { right_off, dgroup.dnodes[1] } });
+    dgroup.dnodes[0] = (struct nodep) { ddom, right_off };
+    ret = dcli->gm_updator(dcli->priv, split_key, rfence, dgroup);
     if (unlikely(ret)) {
         pr_err("failed to update dgroup map: %s", strerror(-ret));
         goto out;
@@ -804,9 +813,9 @@ static int hnode_split_median(dcli_t *dcli, dgroup_t dgroup, size_t *new_hnode, 
         goto out;
     }
     if (k_cmp(dcli->kc, key, split_key) >= 0) {
-        *new_hnode = right_off;
+        *new_hnode = (struct nodep) { ddom, right_off };
     } else {
-        *new_hnode = left_off;
+        *new_hnode = (struct nodep) { ddom, left_off };
     }
 
     put_dentry_key(dcli, &dnode->entries[order[pos]], split_key.key);
@@ -821,18 +830,18 @@ out:
 }
 
 int dset_upsert(dcli_t *dcli, dgroup_t dgroup, k_t key, uint64_t valp) {
-    size_t hnode_off = dgroup.dnodes[0];
+    struct nodep hnode = dgroup.dnodes[0];
     int ret;
 
-    ret = hnode_upsert(dcli, hnode_off, key, valp);
+    ret = hnode_upsert(dcli, hnode, key, valp);
     if (unlikely(ret == -ENOMEM)) {
         /* hnode full, split and retry */
-        ret = hnode_split_median(dcli, dgroup, &hnode_off, key);
+        ret = hnode_split_median(dcli, dgroup, &hnode, key);
         if (unlikely(ret)) {
             pr_err("hnode split failed: %s", strerror(-ret));
             goto out;
         }
-        ret = hnode_upsert(dcli, hnode_off, key, valp);
+        ret = hnode_upsert(dcli, hnode, key, valp);
     }
     if (unlikely(ret)) {
         pr_err("dset upsert failed: %s", strerror(-ret));

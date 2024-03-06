@@ -248,4 +248,6 @@ static void memcpy_nt(void *dst, void *src, size_t len) {
 	}
 }
 
+unsigned int get_rand_seed();
+
 #endif //BONSAIKV_UTILS_H
