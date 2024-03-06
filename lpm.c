@@ -290,7 +290,7 @@ void lpma_flush(lpma_cli_t *lpma_cli, size_t off, size_t size) {
     do_lpma_flush_slowpath(lpma_cli, off, size);
 }
 
-void lpma_persist(lpma_cli_t *lpma_cli) {
+void lpma_persist() {
     memory_sfence();
 }
 

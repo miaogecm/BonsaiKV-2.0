@@ -20,7 +20,7 @@
 #include "dset.h"
 #include "k.h"
 
-#define NO_OFF          (-1ul)
+#define NO_NODE         (-1ul)
 #define TOMBSTONE       (-1ul)
 
 struct valp {
@@ -34,8 +34,9 @@ struct valp {
                 };
                 struct {
                     int is_lpm : 1;
+                    int dom : 5;
                     size_t len : 14;
-                    size_t off : 48;
+                    size_t off : 43;
                 };
             };
         };
@@ -66,7 +67,7 @@ struct dentry {
 };
 
 struct mnode {
-    size_t next_off, prev_off;
+    struct nodep next, prev;
     int nr_ents;
     bool ref;
     uint8_t fgprt[];
@@ -98,7 +99,7 @@ struct dset {
 
     size_t pm_utilization;
 
-    size_t pivot_hnode;
+    struct nodep pivot_hnode;
 
     int max_gc_prefetch;
 };
@@ -333,14 +334,14 @@ static inline int create_sentinel(dcli_t *dcli) {
     fnode = lpma_get_ptr(dcli->dom_lpma_clis[0], hoff + dcli->hnode_size);
     msize = sizeof(*mnode) + dcli->hfanout * sizeof(uint8_t);
     memset(mnode, 0, msize);
-    mnode->prev_off = mnode->next_off = NO_OFF;
+    mnode->prev.rawp = mnode->next.rawp = NO_NODE;
     fnode->lfence_len = dcli->kc->min.len;
     fnode->rfence_len = dcli->kc->max.len;
     memcpy(fnode->fences, dcli->kc->min.key, dcli->kc->min.len);
     memcpy(fnode->fences + dcli->kc->min.len, dcli->kc->max.key, dcli->kc->max.len);
     lpma_flush(dcli->dom_lpma_clis[0], hoff, msize);
     lpma_flush(dcli->dom_lpma_clis[0], hoff + dcli->hnode_size, fsize);
-    lpma_persist(dcli->dom_lpma_clis[0]);
+    lpma_persist();
 
     /* init cnode sentinel */
     mnode = rpma_buf_alloc(dcli->dom_rpma_clis[0], msize);
@@ -351,7 +352,7 @@ static inline int create_sentinel(dcli_t *dcli) {
     }
     msize = sizeof(*mnode) + dcli->cfanout * sizeof(uint8_t);
     memset(mnode, 0, msize);
-    mnode->prev_off = mnode->next_off = NO_OFF;
+    mnode->prev.rawp = mnode->next.rawp = NO_NODE;
 
     /* write back cnode sentinel */
     ret = rpma_wr(dcli->dom_rpma_clis[0], coff, 0, mnode, msize);
@@ -698,6 +699,24 @@ static int *get_order_arr(dcli_t *dcli, int *nr, struct nodep hnode, struct mnod
     return order;
 }
 
+/*
+ * hnode split algorithm (two new nodes are combined into one box)
+ *
+ *                 ┌────────┐ (1) persist the new node's next and prev pointer
+ *    ┌────────────┤        ├────────────┐
+ *    │            │new     │            │
+ *    │    xxxxxxx─►        ◄───────┐    │
+ *    │    x       └────────┘       │    │
+ *    │    x                        │    │
+ *  ┌─▼────x─┐     ┌────────┐     ┌─┴────▼─┐
+ *  │        │     │        │     │        │
+ *  │        └─────►        └─────►        │
+ *  │ prev   ◄─────┐ old    ◄─────┐ next   │
+ *  └────────┘     └────────┘     └────────┘
+ * (2) persist                  (3) change next->prev
+ *     prev->next                   (no need to persist, can be recovered)
+ *     (durable point)
+ */
 static int hnode_split_median(dcli_t *dcli, dgroup_t dgroup, struct nodep *new_hnode, k_t key) {
     struct mnode *prev, *next, *mnode, *mleft, *mright;
     int *order, nr, ret = 0, i, pos, dom, ddom;
@@ -712,8 +731,8 @@ static int hnode_split_median(dcli_t *dcli, dgroup_t dgroup, struct nodep *new_h
     mnode = lpma_get_ptr(dcli->dom_lpma_clis[dom], dgroup.dnodes[0].off);
     dnode = lpma_get_ptr(dcli->dom_lpma_clis[dom], dgroup.dnodes[0].off + dcli->hstrip_size);
     fnode = lpma_get_ptr(dcli->dom_lpma_clis[dom], dgroup.dnodes[0].off + dcli->hnode_size);
-    prev = mnode->prev_off ? lpma_get_ptr(dcli->dom_lpma_clis[dom], mnode->prev_off) : NULL;
-    next = mnode->next_off ? lpma_get_ptr(dcli->dom_lpma_clis[dom], mnode->next_off) : NULL;
+    prev = mnode->prev.rawp != NO_NODE ? lpma_get_ptr(dcli->dom_lpma_clis[mnode->prev.dom], mnode->prev.off) : NULL;
+    next = mnode->next.rawp != NO_NODE ? lpma_get_ptr(dcli->dom_lpma_clis[mnode->next.dom], mnode->next.off) : NULL;
 
     /* get order array */
     order = get_order_arr(dcli, &nr, dgroup.dnodes[0], mnode, dnode);
@@ -772,26 +791,28 @@ static int hnode_split_median(dcli_t *dcli, dgroup_t dgroup, struct nodep *new_h
     lfence = (k_t) { .key = fnode->fences, .len = fnode->lfence_len };
     rfence = (k_t) { .key = fnode->fences + fnode->lfence_len, .len = fnode->rfence_len };
 
-    /* link new nodes and persist data */
-    mleft->prev_off = mnode->prev_off;
-    mleft->next_off = right_off;
-    mright->prev_off = left_off;
-    mright->next_off = mnode->next_off;
+    /* persist newly created nodes */
+    mleft->prev.rawp = mnode->prev.rawp;
+    mleft->next = (struct nodep) { ddom, right_off };
+    mright->prev = (struct nodep) { ddom, left_off };
+    mright->next.rawp = mnode->next.rawp;
     lpma_flush(dcli->dom_lpma_clis[ddom], left_off, dcli->hnode_size);
     lpma_flush(dcli->dom_lpma_clis[ddom], right_off, dcli->hnode_size);
-    if (next) {
-        next->prev_off = right_off;
-    }
-    lpma_persist(dcli->dom_lpma_clis[ddom]);
+    lpma_persist();
 
-    /* persist the link, this is the durable point of this split */
+    /* changes to next->prev can be volatile, because prev pointers can be recovered */
+    if (next) {
+        next->prev = (struct nodep) { ddom, right_off };
+    }
+
+    /* persist the link (change prev->next), this is the durable point of this split */
     if (prev) {
-        WRITE_ONCE(prev->next_off, left_off);
-        lpma_flush(dcli->dom_lpma_clis[ddom], mnode->prev_off, sizeof(*prev));
+        WRITE_ONCE(prev->next, ((struct nodep) { ddom, left_off }));
+        lpma_flush(dcli->dom_lpma_clis[mnode->prev.dom], mnode->prev.off, sizeof(*prev));
     } else {
         /* TODO: FIXME */
     }
-    lpma_persist(dcli->dom_lpma_clis[ddom]);
+    lpma_persist();
 
     /* make new hnode visible to upper layer */
     dgroup.dnodes[0] = (struct nodep) { ddom, left_off };
@@ -862,9 +883,9 @@ int dset_lookup(dcli_t *dcli, dgroup_t dgroup, k_t key, uint64_t *valp) {
 
 int dset_create_valp(dcli_t *dcli, uint64_t *valp, k_t key, const void *val, size_t len) {
     size_t off, persisted = 0, stage_len, ovf_len;
+    int ret = 0, dom;
     struct valp vp;
     uint64_t data;
-    int ret = 0;
 
     if (unlikely(len >= (1ul << 14))) {
         ret = -EINVAL;
@@ -882,11 +903,13 @@ int dset_create_valp(dcli_t *dcli, uint64_t *valp, k_t key, const void *val, siz
         }
     }
 
+    dom = rand_r(&dcli->seed) % dcli->nr_ldoms;
+
     /* calculate key overflow length */
     ovf_len = key.len - min(key.len, dcli->kc->typical_len);
 
     /* alloc value memory in local PM */
-    vp.off = off = lpma_alloc(dcli->lpma_cli, len + ovf_len);
+    vp.off = off = lpma_alloc(dcli->dom_lpma_clis[0], len + ovf_len);
     bonsai_assert(off < (1ul << 48));
     if (unlikely(IS_ERR(off))) {
         ret = -ENOMEM;
@@ -898,8 +921,8 @@ int dset_create_valp(dcli_t *dcli, uint64_t *valp, k_t key, const void *val, siz
     while (persisted < len) {
         stage_len = min(len - persisted, dcli->pstage_sz);
 
-        lpma_wr_nc(dcli->lpma_cli, off, val, stage_len);
-        lpma_persist(dcli->lpma_cli);
+        lpma_wr_nc(dcli->dom_lpma_clis[dom], off, val, stage_len);
+        lpma_persist();
 
         off += stage_len;
         val += stage_len;
@@ -908,8 +931,8 @@ int dset_create_valp(dcli_t *dcli, uint64_t *valp, k_t key, const void *val, siz
 
     /* persist key overflow part */
     if (ovf_len) {
-        lpma_wr_nc(dcli->lpma_cli, off, key.key + dcli->kc->typical_len, ovf_len);
-        lpma_persist(dcli->lpma_cli);
+        lpma_wr_nc(dcli->dom_lpma_clis[dom], off, key.key + dcli->kc->typical_len, ovf_len);
+        lpma_persist();
     }
 
     vp.inline_val = 0;
@@ -927,20 +950,20 @@ out:
 static inline int get_val_lpm(dcli_t *dcli, void *buf, int bufsz, struct valp vp) {
     int read_len = min(bufsz, vp.len);
     bonsai_assert(vp.is_lpm);
-    lpma_rd(dcli->lpma_cli, buf, vp.off, read_len);
+    lpma_rd(dcli->dom_lpma_clis[vp.dom], buf, vp.off, read_len);
     return read_len;
 }
 
 static inline int get_val_rpm(dcli_t *dcli, void *buf, int bufsz, struct valp vp) {
     int ret;
 
-    ret = rpma_rd(dcli->rpma_cli, vp.off, 0, buf, min(bufsz, vp.len));
+    ret = rpma_rd(dcli->dom_rpma_clis[vp.dom], vp.off, 0, buf, min(bufsz, vp.len));
     if (unlikely(ret < 0)) {
         pr_err("failed to read value from remote PM: %s", strerror(-ret));
         goto out;
     }
 
-    ret = rpma_commit_sync(dcli->rpma_cli);
+    ret = rpma_commit_sync(dcli->dom_rpma_clis[vp.dom]);
     if (unlikely(ret < 0)) {
         pr_err("failed to commit value read from remote PM: %s", strerror(-ret));
         goto out;
@@ -975,22 +998,22 @@ size_t dset_get_pm_utilization(dcli_t *dcli) {
     return dcli->dset->pm_utilization;
 }
 
-static inline size_t choose_gc_target(dcli_t *dcli) {
+static inline struct nodep choose_gc_target(dcli_t *dcli) {
     dset_t *dset = dcli->dset;
     struct mnode *mnode;
-    size_t target;
+    struct nodep target;
 
     /* choose GC target based on clock pLRU algorithm to find the least recently updated node */
     target = dset->pivot_hnode;
-    mnode = lpma_get_ptr(dcli->lpma_cli, target);
+    mnode = lpma_get_ptr(dcli->dom_lpma_clis[target.dom], target.off);
     while (mnode->ref) {
         mnode->ref = false;
-        if (unlikely(mnode->next_off == NO_OFF)) {
+        if (unlikely(mnode->next.rawp == NO_NODE)) {
             target = dset->sentinel_hnode;
         } else {
-            target = mnode->next_off;
+            target = mnode->next;
         }
-        mnode = lpma_get_ptr(dcli->lpma_cli, target);
+        mnode = lpma_get_ptr(dcli->dom_lpma_clis[target.dom], target.off);
     }
 
     return target;
@@ -1017,16 +1040,17 @@ static inline size_t choose_gc_target(dcli_t *dcli) {
  *                append-only (out-of-place)
  */
 static inline int gc_hnodes(dcli_t *dcli) {
-    size_t target, cnode_off, dnode_start_off;
     int ret, nr_gc_ents, nr_gc_hnodes;
     struct mnode *hmnode, *cmnode;
+    struct nodep target, cnode;
+    size_t dnode_start_off;
     k_t lfence, rfence;
     rpma_buf_t *bufs;
     dgroup_t dgroup;
 
     /* choose GC target (strategy: the least recently updated node) */
     target = choose_gc_target(dcli);
-    hmnode = lpma_get_ptr(dcli->lpma_cli, target);
+    hmnode = lpma_get_ptr(dcli->dom_lpma_clis[target.dom], target.off);
     lfence = get_hnode_lfence(dcli, hmnode);
     rfence = get_hnode_rfence(dcli, hmnode);
 
@@ -1036,8 +1060,8 @@ static inline int gc_hnodes(dcli_t *dcli) {
         pr_err("failed to lookup dgroup map: %s", strerror(-ret));
         goto out;
     }
-    cnode_off = dgroup.dnodes[1];
-    cmnode = cnode_get_mnode(dcli, cnode_off);
+    cnode = dgroup.dnodes[1];
+    cmnode = cnode_get_mnode(dcli, cnode);
     if (unlikely(IS_ERR(cmnode))) {
         pr_err("failed to get mnode: %s", strerror(-PTR_ERR(cmnode)));
         ret = PTR_ERR(cmnode);
@@ -1055,7 +1079,7 @@ static inline int gc_hnodes(dcli_t *dcli) {
     /* get target hnodes (prefetch succeeding hnodes) and modify cmnode */
     nr_gc_hnodes = nr_gc_ents = 0;
 
-    while (dgroup.dnodes[1] == cnode_off && nr_gc_ents + cmnode->nr_ents < dcli->cfanout) {
+    while (dgroup.dnodes[1].rawp == cnode.rawp && nr_gc_ents + cmnode->nr_ents < dcli->cfanout) {
         bufs[nr_gc_hnodes].start = (void *) hmnode + dcli->hstrip_size;
         bufs[nr_gc_hnodes].size = sizeof_dentry(dcli) * hmnode->nr_ents;
 
@@ -1073,8 +1097,8 @@ static inline int gc_hnodes(dcli_t *dcli) {
     }
 
     /* write cnode data */
-    dnode_start_off = cnode_off + dcli->cstrip_size + cmnode->nr_ents * sizeof_dentry(dcli);
-    ret = rpma_wr_(dcli->rpma_cli, dnode_start_off, bufs, 0);
+    dnode_start_off = cnode.off + dcli->cstrip_size + cmnode->nr_ents * sizeof_dentry(dcli);
+    ret = rpma_wr_(dcli->dom_rpma_clis[cnode.dom], dnode_start_off, bufs, 0);
     if (unlikely(ret < 0)) {
         free(bufs);
         pr_err("failed to GC data to cnode: %s", strerror(-ret));
@@ -1082,7 +1106,8 @@ static inline int gc_hnodes(dcli_t *dcli) {
     }
 
     /* write cnode metadata */
-    ret = rpma_wr(dcli->rpma_cli, cnode_off, 0, cmnode, sizeof(*cmnode) + cmnode->nr_ents * sizeof(uint8_t));
+    ret = rpma_wr(dcli->dom_rpma_clis[cnode.dom], cnode.off, 0,
+                  cmnode, sizeof(*cmnode) + cmnode->nr_ents * sizeof(uint8_t));
     if (unlikely(ret < 0)) {
         free(bufs);
         pr_err("failed to GC metadata to cnode: %s", strerror(-ret));
@@ -1090,7 +1115,7 @@ static inline int gc_hnodes(dcli_t *dcli) {
     }
 
     /* commit remote changes and wait */
-    ret = rpma_commit_sync(dcli->rpma_cli);
+    ret = rpma_commit_sync(dcli->dom_rpma_clis[cnode.dom]);
     if (unlikely(ret < 0)) {
         free(bufs);
         pr_err("failed to commit GC data to cnode");

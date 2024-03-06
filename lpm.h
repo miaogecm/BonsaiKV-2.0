@@ -32,7 +32,7 @@ void lpma_rd(lpma_cli_t *lpma_cli, void *dst, size_t src, size_t size);
 
 void lpma_prefetch(lpma_cli_t *lpma_cli, size_t off, size_t size);
 void lpma_flush(lpma_cli_t *lpma_cli, size_t off, size_t size);
-void lpma_persist(lpma_cli_t *lpma_cli);
+void lpma_persist();
 
 size_t lpma_alloc(lpma_cli_t *lpma_cli, size_t size);
 void lpma_free(lpma_cli_t *lpma_cli, size_t off, size_t size);
