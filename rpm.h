@@ -1,11 +1,66 @@
 /*
  * BonsaiKV+: Scaling persistent in-memory key-value store for modern tiered, heterogeneous memory systems
  *
- * Local Persistent Memory Management
+ * Scalable & Hardware-accelerated Remote Persistent Memory Management
  *
  * RPMM provides RPMA (Remote Persistent Memory Area) abstraction. An RPMA is a logically continuous memory
  * area starting from offset 0. However, it may be physically interleaved across multiple NVMM devices in
- * a single memory node.
+ * a single memory node. Also, it can be physically divided into multiple domains.
+ *
+ * RPMA Logical View
+ *     0x00│   ┌──────────────┐
+ *         │   │aaaaaaaaaaaaaa│
+ *         │   │bbbbbbbbbbbbbb│
+ *         │   │cccccccccccccc│
+ *         │   │dddddddddddddd│
+ *    size │   │              │
+ *         ▼   └──────────────┘
+ *
+ * RPMA Physical View
+ *     0x00│   ┌──────────────┐        ┌──────────────┐
+ *         │   │aaaaaaaaaaaaaa│        │              │
+ *         │   │dev0          │        │dev1          │     │
+ *         │   ├──────────────┤        ├──────────────┤     │
+ *         │   │bbbbbbbbbbbbbb│        │              │     │
+ *         │   │dev2          │        │dev3          │     │    (2)
+ *         │   ├──────────────┤  (1)   ├──────────────┤     │ interleaved
+ *         │   │cccccccccccccc│replica │cccccccccccccc│     │
+ *         │   │dev4          │        │dev5          │     │
+ *         │   ├──────────────┤        ├──────────────┤     │
+ *         │   │              │        │dddddddddddddd│     │
+ *    size │   │dev6          │        │dev7          │
+ *         ▼   └──────────────┘        └──────────────┘
+ *                  dom0                    dom1
+ *
+ * Basic concepts:
+ *   RPMA: Remote Persistent Memory Area
+ *   Strip/Stripe
+ *   (Home/Replica) Segment
+ *   Directory: The per-dom directory maintains the caching state of each segment.
+ *
+ * An RPMA can be viewed as:
+ *   (1) A logically continuous memory area starting from offset 0.
+ *   (2) Interleaving of multiple STRIPEs, while each STRIPE consists of multiple STRIPS. Each
+ *       STRIP belongs to one device.
+ *   (3) Concatnation of multiple SEGMENTs. Each SEGMENT can be replicated across domains.
+ *
+ *                ┌──────────────┐        ┌──────────────┐ ────────────────────┐
+ * segment ┌──────►aaaaaaaaaaaaaa│        │aaaaaaaaaaaaaa│                     │
+ * segment │┼┼┼┼┼┤►bbbbbbbbbbbbbb│        │bbbbbbbbbbbbbb│                     │
+ * segment └──────►cccccccccccccc│        │cccccccccccccc│                     │
+ *                ┌──────────────┤        ├──────────────┤ ──┐                 │
+ *                │dddddddddddddd│        │dddddddddddddd│   │ strip           │ stripe
+ *                │eeeeeeeeeeeeee│        │              │   │                 │ (interleave
+ *                │              │        │ffffffffffffff│   │                 │        set)
+ *                ├──────────────┤        ├──────────────┤ ──┘                 │
+ *  home   ──────►│CCCCCCCCCCCCCC│        │cccccccccccccc│                     │
+ *  segment       │              │        │              │                     │
+ *                │              │        │              │                     │
+ *                ├──────────────┤        ├──────────────┤                     │
+ *  replica ─────►│dddddddddddddd│        │DDDDDDDDDDDDDD│◄─── home segment    │
+ *  segment       │              │        │              │                     │
+ *                │              │        │              │ ────────────────────┘
+ *                └──────────────┘        └──────────────┘
  *
  * Hohai University
  */
