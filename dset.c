@@ -82,13 +82,13 @@ struct fnode {
     char fences[];
 };
 
-/*
- * In-NVM Domain cache directory
- *
- * Domain cache directory saves information about each strip
- */
-struct dom_cache_dir {
+struct dom_dir {
+    unsigned int segment_ts[];
+};
 
+struct dom {
+    struct dom_dir *dir;
+    rpma_t *dom_rpma;
 };
 
 struct dset {
