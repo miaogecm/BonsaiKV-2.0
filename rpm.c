@@ -70,6 +70,7 @@
 #include <rdma/rdma_cma.h>
 #include <arpa/inet.h>
 #include <sys/mman.h>
+#include <sys/time.h>
 #include <pthread.h>
 
 #include "atomic.h"
@@ -95,6 +96,8 @@
 
 #define OP_BUF_SIZE     (1 * 1024 * 1024ul)
 #define CLI_BUF_SIZE    (1 * 1024 * 1024ul)
+
+static unsigned epoch;
 
 /*
  * RPMA server-side data structures
@@ -192,12 +195,20 @@ struct cm_dom {
 };
 
 /*
+ * RPMA client-side data structures
+ */
+
+struct segment_info {
+    unsigned epoch;
+};
+
+/*
  * In-NVM Domain cache directory
  *
  * Domain cache directory saves information about each segment
  */
 struct dom_dir {
-    unsigned int segment_ts[];
+    struct segment_info seginfos[];
 };
 
 struct cli_dom {
@@ -860,7 +871,38 @@ out:
     return ret;
 }
 
-rpma_t *rpma_create(const char *host, const char *dev_ip) {
+static void epoch_timer_handler(int sig) {
+    epoch++;
+}
+
+static int register_epoch_timer(int interval_us) {
+    struct itimerval value;
+    struct sigaction sa;
+    int ret = 0;
+
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+    sa.sa_handler = epoch_timer_handler;
+    if (sigaction(SIGALRM, &sa, NULL) == -1) {
+        pr_err("sigaction failed");
+        goto out;
+    }
+
+    value.it_interval.tv_sec = interval_us / 1000000;
+    value.it_interval.tv_usec = interval_us % 1000000;
+    value.it_value = value.it_interval;
+
+    ret = setitimer(ITIMER_REAL, &value, NULL);
+    if (ret) {
+        pr_err("setitimer failed");
+        goto out;
+    }
+
+out:
+    return ret;
+}
+
+rpma_t *rpma_create(const char *host, const char *dev_ip, int interval_us) {
     rpma_t *rpma;
 
     rpma = calloc(1, sizeof(*rpma));
@@ -872,6 +914,7 @@ rpma_t *rpma_create(const char *host, const char *dev_ip) {
 
     rpma->host = host;
     rpma->dev_ip = dev_ip;
+    register_epoch_timer(interval_us);
 
 out:
     return rpma;
@@ -1263,6 +1306,89 @@ out:
     return ret;
 }
 
+static inline int replicate(rpma_cli_t *cli, void *replica, rpma_ptr_t src) {
+    int ret = 0, num_sge, i;
+    struct ibv_send_wr *wr;
+    struct ibv_sge *sgl;
+    size_t target_off;
+    void *data;
+
+    data = malloc(cli->segment_size * cli->nr_doms);
+    if (unlikely(!data)) {
+        ret = -ENOMEM;
+        pr_err("failed to allocate memory for replica: %s", strerror(-ret));
+        goto out;
+    }
+    for (i = 0; i < cli->nr_doms; i++) {
+        memcpy(data + i * cli->segment_size, replica, cli->segment_size);
+    }
+
+    target_off = src.off * cli->nr_doms;
+
+    sgl = get_sg_list(cli, rpma_buflist(cli, data, cli->segment_size * cli->nr_doms), &num_sge);
+    if (unlikely(IS_ERR(sgl))) {
+        ret = PTR_ERR(sgl);
+        pr_err("failed to get sg list: %s", strerror(-ret));
+        goto out;
+    }
+
+    wr = calloc(1, sizeof(*wr));
+    if (unlikely(!wr)) {
+        free(sgl);
+        ret = -ENOMEM;
+        pr_err("failed to allocate memory for send WR: %s", strerror(-ret));
+        goto out;
+    }
+
+    wr->opcode = IBV_WR_RDMA_WRITE;
+    wr->wr_id = 0;
+    wr->sg_list = sgl;
+    wr->num_sge = num_sge;
+    wr->wr.rdma.remote_addr = target_off;
+    wr->wr.rdma.rkey = cli->repmr_key;
+
+    insert_into_wr_list(cli, wr);
+
+out:
+    return ret;
+}
+
+static inline int rd_segment_fastpath(rpma_cli_t *cli, void *buf, rpma_ptr_t src, rpma_flag_t flag) {
+    struct dom_dir *dir = cli->doms[cli->local_dom].dir;
+    struct segment_info *si;
+    int now_epoch;
+    size_t seg;
+    void *data;
+
+    seg = src.off / cli->segment_size;
+    si = &dir->seginfos[seg];
+
+    now_epoch = ACCESS_ONCE(epoch);
+    if (now_epoch > si->epoch + 1) {
+        /* At lease one epoch in between. It's invalidated. */
+        data = push_operand(cli, NULL, cli->segment_size);
+
+        /* read segment */
+        rpma_rd(cli, src, 0, data, cli->segment_size);
+
+        /* replicate segment to all domains actively */
+        replicate(cli, data, src);
+
+        /* update metadata */
+        si->epoch = now_epoch;
+
+        memcpy(buf, data, cli->segment_size);
+
+        return 0;
+    }
+
+    /* read from local domain */
+    src.home = cli->local_dom;
+    rpma_rd(cli, src, 0, buf, cli->segment_size);
+
+    return 0;
+}
+
 int rpma_rd_(rpma_cli_t *cli, rpma_buf_t dst[], rpma_ptr_t src, rpma_flag_t flag) {
     struct ibv_send_wr *wr;
     int ret = 0, num_sge;
@@ -1271,6 +1397,11 @@ int rpma_rd_(rpma_cli_t *cli, rpma_buf_t dst[], rpma_ptr_t src, rpma_flag_t flag
     if (unlikely(src.off >= cli->logical_size)) {
         ret = -EINVAL;
         pr_err("invalid source offset: %lu", src);
+        goto out;
+    }
+
+    if (!dst[1].start && dst[0].size == cli->segment_size && src.off % cli->segment_size == 0) {
+        ret = rd_segment_fastpath(cli, dst[0].start, src, flag);
         goto out;
     }
 
