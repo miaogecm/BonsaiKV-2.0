@@ -106,6 +106,8 @@ struct dcli {
     size_t pstage_sz;
 
     unsigned seed;
+
+    struct mnode *prefetched_mnode;
 };
 
 dset_t *dset_create(kc_t *kc,
@@ -462,6 +464,68 @@ out:
     return ret;
 }
 
+static inline void bnode_prefetch(dcli_t *dcli, size_t bnode) {
+    struct mnode *mnode;
+    mnode = boff2ptr(dcli, bnode);
+    prefetch_range(mnode, sizeof(*mnode) + dcli->bfanout * sizeof(uint8_t));
+}
+
+static inline int dnode_prefetch(dcli_t *dcli, rpma_ptr_t dnode) {
+    struct mnode *mnode;
+    size_t msize;
+    int ret = 0;
+
+    msize = sizeof(struct mnode) + dcli->dfanout * sizeof(uint8_t);
+
+    mnode = rpma_buf_alloc(dcli->rpma_cli, msize);
+    if (unlikely(IS_ERR(mnode))) {
+        pr_err("failed to allocate memory for mnode: %s", strerror(-PTR_ERR(mnode)));
+        goto out;
+    }
+
+    ret = rpma_rd(dcli->rpma_cli, dnode, 0, mnode, msize);
+    if (unlikely(ret < 0)) {
+        pr_err("failed to read mnode: %s", strerror(-ret));
+        rpma_buf_free(dcli->rpma_cli, mnode, msize);
+        mnode = ERR_PTR(ret);
+    }
+
+    /* only commit, not sync for ACK */
+    ret = rpma_commit(dcli->rpma_cli);
+    if (unlikely(ret < 0)) {
+        pr_err("failed to commit mnode read: %s", strerror(-ret));
+        rpma_buf_free(dcli->rpma_cli, mnode, dcli->dstrip_size);
+        mnode = ERR_PTR(ret);
+    }
+
+    dcli->prefetched_mnode = mnode;
+
+out:
+    return ret;
+}
+
+static int dnode_lookup(dcli_t *dcli, rpma_ptr_t dnode, k_t key, uint64_t *valp) {
+    struct mnode *mnode;
+    size_t msize;
+    int ret;
+
+    msize = sizeof(struct mnode) + dcli->dfanout * sizeof(uint8_t);
+
+    if (unlikely(!dcli->prefetched_mnode)) {
+        dnode_prefetch(dcli, dnode);
+    }
+
+    ret = rpma_sync(dcli->rpma_cli);
+    if (unlikely(ret < 0)) {
+        pr_err("failed to commit mnode read: %s", strerror(-ret));
+        rpma_buf_free(dcli->rpma_cli, mnode, dcli->dstrip_size);
+        mnode = ERR_PTR(ret);
+    }
+
+out:
+    return mnode;
+}
+
 static int bnode_lookup(dcli_t *dcli, size_t bnode, k_t key, uint64_t *valp) {
     struct mnode *mnode;
     struct enode *enode;
@@ -477,11 +541,14 @@ static int bnode_lookup(dcli_t *dcli, size_t bnode, k_t key, uint64_t *valp) {
     for (idx = 0; idx < mnode->nr_ents; idx++) {
         if (mnode->fgprt[idx] == fgprt) {
             *valp = enode->entries[idx].valp;
+            if (*valp == TOMBSTONE) {
+                ret = -ENOENT;
+            }
             goto out;
         }
     }
 
-    ret = -ENOENT;
+    ret = -ERANGE;
 
 out:
     return ret;
@@ -718,8 +785,22 @@ int dset_delete(dcli_t *dcli, dgroup_t dgroup, k_t key) {
     return bnode_delete(dcli, dgroup.bnode, key);
 }
 
+void dset_prefetch(dcli_t *dcli, dgroup_t dgroup) {
+    bnode_prefetch(dcli, dgroup.bnode);
+    dnode_prefetch(dcli, dgroup.dnode);
+}
+
 int dset_lookup(dcli_t *dcli, dgroup_t dgroup, k_t key, uint64_t *valp) {
-    return bnode_lookup(dcli, dgroup.bnode, key, valp);
+    int ret;
+
+    ret = bnode_lookup(dcli, dgroup.bnode, key, valp);
+    if (ret == -ERANGE) {
+        ret = dnode_lookup(dcli, dgroup.dnode, key, valp);
+        goto out;
+    }
+
+out:
+    return ret;
 }
 
 size_t dset_get_pm_utilization(dcli_t *dcli) {

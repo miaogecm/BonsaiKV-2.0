@@ -7,6 +7,7 @@
  */
 
 #include "utils.h"
+#include "k.h"
 
 #include "masstree/config.h"
 #include "masstree/compiler.hh"
@@ -90,9 +91,9 @@ void index_destroy(index_t *index) {
     delete static_cast<mt_index *>(index);
 }
 
-int index_upsert(index_t *index, const char *key, size_t key_len, void *val) {
+int index_upsert(index_t *index, k_t key, void *val) {
     auto *mti = static_cast<mt_index *>(index);
-    cursor_type lp(mti->tab, key, (int) key_len);
+    cursor_type lp(mti->tab, key.key, key.len);
     lp.find_insert(*ti);
     lp.value() = val;
     fence();
@@ -100,9 +101,9 @@ int index_upsert(index_t *index, const char *key, size_t key_len, void *val) {
     return 0;
 }
 
-int index_remove(index_t *index, const char *key, size_t key_len) {
+int index_remove(index_t *index, k_t key) {
     auto *mti = static_cast<mt_index *>(index);
-    cursor_type lp(mti->tab, key, (int) key_len);
+    cursor_type lp(mti->tab, key.key, key.len);
     if (unlikely(!lp.find_locked(*ti))) {
         lp.finish(0, *ti);
         return -ENOENT;
@@ -111,10 +112,10 @@ int index_remove(index_t *index, const char *key, size_t key_len) {
     return 0;
 }
 
-void *index_find_first_ge(index_t *index, const char *key, size_t key_len) {
+void *index_find_first_ge(index_t *index, k_t key) {
     auto *mti = static_cast<mt_index *>(index);
     void *val = ERR_PTR(-ENOENT);
-    auto k = Str(key, key_len);
+    auto k = Str(key.key, key.len);
     scanner scanner(&val);
     mti->tab.scan(k, true, scanner, *ti);
     return val;

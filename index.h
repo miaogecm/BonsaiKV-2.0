@@ -12,12 +12,14 @@
 #include <unistd.h>
 #include <stdint.h>
 
+#include "k.h"
+
 typedef void index_t;
 
 index_t *index_create();
 void index_destroy(index_t *index);
-int index_upsert(index_t *index, const char *key, size_t key_len, void *val);
-int index_remove(index_t *index, const char *key, size_t key_len);
-void *index_find_first_ge(index_t *index, const char *key, size_t key_len);
+int index_upsert(index_t *index, k_t key, void *val);
+int index_remove(index_t *index, k_t key);
+void *index_find_first_ge(index_t *index, k_t key);
 
 #endif //INDEX_H

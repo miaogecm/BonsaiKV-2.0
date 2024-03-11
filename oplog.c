@@ -316,6 +316,33 @@ out:
     return p.raw;
 }
 
+void logger_prefetch(logger_cli_t *logger_cli, oplog_t log) {
+    struct oplog_ptr o = { .raw = log };
+    logger_cli_t *target_cli;
+    struct oplog_data *log;
+    struct lcb *lcb;
+
+    /* get the client of the oplog */
+    target_cli = logger_cli->logger->clis[o.cli_id];
+    bonsai_assert(target_cli);
+
+    lcb = rcu_dereference(target_cli->lcb);
+
+    /* log in PM or LCB? */
+    if (likely(o.off < lcb->start)) {
+        /* in PM */
+        bonsai_assert(o.off < target_cli->log_region_size);
+        log = target_cli->log_region + o.off;
+    } else {
+        /* in LCB */
+        bonsai_assert(o.off - lcb->start < target_cli->lcb_size);
+        log = (void *) lcb->data + (o.off - lcb->start);
+    }
+
+    /* prefetch log */
+    prefetch_range(log, sizeof(*log) + log->key_len);
+}
+
 op_t logger_get(logger_cli_t *logger_cli, oplog_t log, k_t *key, uint64_t *valp) {
     struct oplog_ptr o = { .raw = log };
     logger_cli_t *target_cli;

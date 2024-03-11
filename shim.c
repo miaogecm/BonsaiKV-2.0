@@ -9,15 +9,14 @@
 #include "shim.h"
 #include "lock.h"
 #include "bitmap.h"
+#include "oplog.h"
 #include "kv.h"
 
 #define INODE_FANOUT    46
 
 struct shim {
     index_t *index;
-    shim_indexer logi, hnodei, cnodei;
-    shim_log_validator log_validator;
-    void *logi_ctx, *log_validator_ctx, *hnodei_ctx, *cnodei_ctx;
+    kc_t *kc;
 };
 
 struct shim_cli {
@@ -25,10 +24,12 @@ struct shim_cli {
 
     /* cache frequently-accessed fields in @shim (to reduce pointer chasing) */
     index_t *index;
-    shim_indexer logi, hnodei, cnodei;
-    void *logi_ctx, *hnodei_ctx, *cnodei_ctx;
+    kc_t *kc;
 
     perf_t *perf;
+
+    logger_cli_t *logger_cli;
+    dcli_t *dcli;
 };
 
 /* Each inode has 8 cache lines */
@@ -38,8 +39,7 @@ struct inode {
 
     inode_t *next;
 
-    uint64_t hnode;
-    uint64_t cnode;
+    dgroup_t dgroup;
 
     uint8_t fgprt[INODE_FANOUT];
     uint16_t rfence_len;
@@ -52,7 +52,7 @@ struct inode {
     char rfence[];
 };
 
-shim_t *shim_create(index_t *index) {
+shim_t *shim_create(index_t *index, kc_t *kc) {
     shim_t *shim;
 
     shim = calloc(1, sizeof(*shim));
@@ -64,36 +64,13 @@ shim_t *shim_create(index_t *index) {
 
     shim->index = index;
 
+    shim->kc = kc;
+
 out:
     return shim;
 }
 
-void shim_set_log_validator(shim_t *shim, shim_log_validator validator, void *priv) {
-    shim->log_validator = validator;
-    shim->log_validator_ctx = priv;
-}
-
-void shim_set_logi(shim_t *shim, shim_indexer logi, void *priv) {
-    shim->logi = logi;
-    shim->logi_ctx = priv;
-}
-
-void shim_set_hnodei(shim_t *shim, shim_indexer hnodei, void *priv) {
-    shim->hnodei = hnodei;
-    shim->hnodei_ctx = priv;
-}
-
-void shim_set_cnodei(shim_t *shim, shim_indexer cnodei, void *priv) {
-    shim->cnodei = cnodei;
-    shim->cnodei_ctx = priv;
-}
-
-void shim_destroy(shim_t *shim) {
-    index_destroy(shim->index);
-    free(shim);
-}
-
-shim_cli_t *shim_create_cli(shim_t *shim, perf_t *perf) {
+shim_cli_t *shim_create_cli(shim_t *shim, perf_t *perf, logger_cli_t *logger_cli) {
     shim_cli_t *shim_cli;
 
     shim_cli = calloc(1, sizeof(*shim_cli));
@@ -106,14 +83,12 @@ shim_cli_t *shim_create_cli(shim_t *shim, perf_t *perf) {
     shim_cli->shim = shim;
 
     shim_cli->index = shim->index;
-    shim_cli->logi = shim->logi;
-    shim_cli->hnodei = shim->hnodei;
-    shim_cli->cnodei = shim->cnodei;
-    shim_cli->logi_ctx = shim->logi_ctx;
-    shim_cli->hnodei_ctx = shim->hnodei_ctx;
-    shim_cli->cnodei_ctx = shim->cnodei_ctx;
+
+    shim_cli->kc = shim->kc;
 
     shim_cli->perf = perf;
+
+    shim_cli->logger_cli = logger_cli;
 
 out:
     return shim_cli;
@@ -123,31 +98,35 @@ void shim_destroy_cli(shim_cli_t *shim_cli) {
     free(shim_cli);
 }
 
-static inline bool key_within_rfence(inode_t *inode, const char *key, size_t key_len) {
-    return !inode->next || memncmp(key, key_len, inode->rfence, inode->rfence_len) < 0;
+static inline k_t i_rfence(inode_t *inode) {
+    return (k_t) { inode->rfence, inode->rfence_len };
 }
 
-static inline inode_t *iget_unlocked(shim_cli_t *shim_cli, const char *key, size_t key_len) {
+static inline bool key_within_rfence(shim_cli_t *shim_cli, inode_t *inode, k_t key) {
+    return !inode->next || k_cmp(shim_cli->kc, key, i_rfence(inode)) < 0;
+}
+
+static inline inode_t *iget_unlocked(shim_cli_t *shim_cli, k_t key) {
     index_t *index = shim_cli->index;
     inode_t *inode;
 
-    inode = index_find_first_ge(index, key, key_len);
+    inode = index_find_first_ge(index, key);
 
     return inode;
 }
 
-static inline inode_t *iget_locked(shim_cli_t *shim_cli, const char *key, size_t key_len) {
+static inline inode_t *iget_locked(shim_cli_t *shim_cli, k_t key) {
     inode_t *inode, *next;
 
 reget:
-    inode = iget_unlocked(shim_cli, key, key_len);
+    inode = iget_unlocked(shim_cli, key);
     spin_lock(&inode->lock);
     if (unlikely(inode->deleted)) {
         spin_unlock(&inode->lock);
         goto reget;
     }
 
-    while (unlikely(!key_within_rfence(inode, key, key_len))) {
+    while (unlikely(!key_within_rfence(shim_cli, inode, key))) {
         next = inode->next;
         bonsai_assert(next);
         spin_lock(&next->lock);
@@ -171,10 +150,23 @@ static inline void i_split(shim_cli_t *shim_cli, inode_t *inode) {
 }
 
 /* TODO: SIMD-optimize */
-static inline void *search_log(shim_cli_t *shim_cli, inode_t *inode, const char *key, size_t key_len, int *pos) {
-    uint8_t fgprt = kv_key_fingerprint(key, key_len);
-    void *val = ERR_PTR(-ENOENT);
+static inline void prefetch_log(shim_cli_t *shim_cli, inode_t *inode, k_t key) {
+    uint8_t fgprt = k_fgprt(shim_cli->kc, key);
     int i;
+
+    for (i = 0; i < INODE_FANOUT; i++) {
+        if (inode->fgprt[i] == fgprt) {
+            logger_prefetch(shim_cli->logger_cli, inode->logs[i]);
+        }
+    }
+}
+
+/* TODO: SIMD-optimize */
+static inline int search_log(shim_cli_t *shim_cli, inode_t *inode, k_t key, uint64_t *valp, int *pos) {
+    uint8_t fgprt = k_fgprt(shim_cli->kc, key);
+    int i, ret = -ERANGE;
+    k_t log_key;
+    op_t op;
 
     *pos = INODE_FANOUT;
 
@@ -183,41 +175,46 @@ static inline void *search_log(shim_cli_t *shim_cli, inode_t *inode, const char 
             continue;
         }
 
-        val = shim_cli->logi(inode->logs[i], key, key_len, shim_cli->logi_ctx);
-        if (unlikely(val == ERR_PTR(-ENOENT))) {
+        op = logger_get(shim_cli->logger_cli, inode->logs[i], &log_key, valp);
+
+        if (k_cmp(shim_cli->kc, key, log_key) != 0) {
+            /* not this key, hash collision */
             continue;
         }
 
+        if (unlikely(op == OP_DEL)) {
+            ret = -ENOENT;
+            goto out;
+        }
+
+        ret = 0;
         *pos = i;
         break;
     }
 
-    return val;
+out:
+    return ret;
 }
 
-static inline void *search_hnode(shim_cli_t *shim_cli, inode_t *inode, const char *key, size_t key_len) {
-    return shim_cli->hnodei(inode->hnode, key, key_len, shim_cli->hnodei_ctx);
+static inline int search_dset(shim_cli_t *shim_cli, inode_t *inode, k_t key, uint64_t *valp) {
+    return -ENOENT;
 }
 
-static inline void *search_cnode(shim_cli_t *shim_cli, inode_t *inode, const char *key, size_t key_len) {
-    return shim_cli->cnodei(inode->cnode, key, key_len, shim_cli->cnodei_ctx);
-}
-
-int shim_upsert(shim_cli_t *shim_cli, const char *key, size_t key_len, void *log) {
+int shim_upsert(shim_cli_t *shim_cli, k_t key, oplog_t log) {
     unsigned long validmap;
     inode_t *inode;
+    uint64_t valp;
     int pos, ret;
-    void *val;
 
-    inode = iget_locked(shim_cli, key, key_len);
+    inode = iget_locked(shim_cli, key);
 
     validmap = inode->validmap;
 
-    val = search_log(shim_cli, inode, key, key_len, &pos);
-    if (unlikely(!IS_ERR(val))) {
+    ret = search_log(shim_cli, inode, key, &valp, &pos);
+    if (unlikely(!IS_ERR(ret))) {
         /* Key exists, update */
         ret = -EEXIST;
-    } else if (val == ERR_PTR(-ENOENT)) {
+    } else if (ret == -ENOENT || ret == -ERANGE) {
         pos = find_first_zero_bit(&validmap, INODE_FANOUT);
 
         if (unlikely(pos == INODE_FANOUT)) {
@@ -234,12 +231,11 @@ int shim_upsert(shim_cli_t *shim_cli, const char *key, size_t key_len, void *log
 
         ret = 0;
     } else {
-        ret = PTR_ERR(val);
         goto out;
     }
 
     inode->logs[pos] = log;
-    inode->fgprt[pos] = kv_key_fingerprint(key, key_len);
+    inode->fgprt[pos] = k_fgprt(shim_cli->kc, key);
     barrier();
 
     inode->validmap = validmap;
@@ -250,15 +246,15 @@ out:
     return ret;
 }
 
-void *shim_lookup(shim_cli_t *shim_cli, const char *key, size_t key_len) {
+int shim_lookup(shim_cli_t *shim_cli, k_t key, uint64_t *valp) {
     inode_t *inode, *next;
     char rfence_buf[256];
     size_t rfence_len;
     unsigned int seq;
-    void *val;
-    int pos;
+    int pos, ret;
+    k_t rfence;
 
-    inode = iget_unlocked(shim_cli, key, key_len);
+    inode = iget_unlocked(shim_cli, key);
 
 retry:
     seq = read_seqcount_begin(&inode->seq);
@@ -271,24 +267,27 @@ retry:
         goto retry;
     }
 
-    if (unlikely(memncmp(key, key_len, rfence_buf, rfence_len) >= 0)) {
+    rfence = (k_t) { rfence_buf, rfence_len };
+
+    if (unlikely(k_cmp(shim_cli->kc, key, rfence) >= 0)) {
         inode = next;
         goto retry;
     }
 
-    val = search_log(shim_cli, inode, key, key_len, &pos);
+    /* prefetch for pipelining */
+    prefetch_log(shim_cli, inode, key);
+    dset_prefetch(shim_cli->dcli, inode->dgroup);
+
+    ret = search_log(shim_cli, inode, key, valp, &pos);
 
     if (unlikely(read_seqcount_retry(&inode->seq, seq))) {
         goto retry;
     }
 
-    /* collaborative tiered lookup */
-    if (val == ERR_PTR(-ENOENT)) {
-        val = search_hnode(shim_cli, inode, key, key_len);
-        if (val == ERR_PTR(-ENOENT)) {
-            val = search_cnode(shim_cli, inode, key, key_len);
-        }
+    /* tiered lookup */
+    if (ret == -ERANGE) {
+        ret = search_dset(shim_cli, inode, key, valp);
     }
 
-    return val;
+    return ret;
 }
