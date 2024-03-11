@@ -136,8 +136,13 @@ typedef struct rpma_ptr rpma_ptr_t;
 typedef unsigned long rpma_flag_t;
 
 struct rpma_ptr {
-    uint16_t home;
-    uint64_t off : 48;
+    union {
+        struct {
+            uint16_t home;
+            uint64_t off : 48;
+        };
+        uint64_t rawp;
+    };
 };
 
 struct rpma_buf {
@@ -145,7 +150,7 @@ struct rpma_buf {
     size_t size;
 };
 
-rpma_t *rpma_create(const char *host, const char *dev_ip, int interval_us);
+rpma_t *rpma_create(const char *host, const char *dev_ip, int interval_usZ);
 void rpma_destroy(rpma_t *rpma);
 
 rpma_cli_t *rpma_cli_create(rpma_t *rpma, perf_t *perf);
@@ -180,5 +185,8 @@ void rpma_free(rpma_cli_t *cli, rpma_ptr_t ptr, size_t size);
 
 size_t rpma_get_strip_size(rpma_cli_t *cli);
 size_t rpma_get_stripe_size(rpma_cli_t *cli);
+
+#define RPMA_NULL                   ((rpma_ptr_t) { .rawp = UINT64_MAX })
+#define RPMA_PTR_OFF(ptr, offset)   ((rpma_ptr_t) { .home = (ptr).home, .off = (ptr).off + (offset) })
 
 #endif // RPM_H
