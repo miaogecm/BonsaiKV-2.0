@@ -52,4 +52,10 @@ size_t dset_get_pm_utilization(dcli_t *dcli);
 
 int dset_gc(dcli_t *dcli, size_t *gc_size);
 
+#ifndef DSET_SOURCE
+static inline bool dgroup_is_eq(dgroup_t a, dgroup_t b) {
+    return a.nodes[0] == b.nodes[0] && a.nodes[1] == b.nodes[1];
+}
+#endif
+
 #endif //DSET_H

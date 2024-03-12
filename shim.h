@@ -31,4 +31,8 @@ int shim_upsert(shim_cli_t *shim_cli, k_t key, oplog_t log);
 int shim_lookup(shim_cli_t *shim_cli, k_t key, uint64_t *valp);
 void shim_scan(shim_cli_t *shim_cli, shim_log_scanner scanner, void *priv);
 
+/* new dgroup must be different from the previous one */
+int shim_update_dgroup(shim_cli_t *shim_cli, k_t s, k_t t, dgroup_t dgroup);
+int shim_lookup_dgroup(shim_cli_t *shim_cli, k_t key, dgroup_t *dgroup);
+
 #endif //SHIM_H
