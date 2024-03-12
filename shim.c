@@ -142,14 +142,24 @@ reget:
     return 0;
 }
 
-static inline void i_gc(shim_cli_t *shim_cli, inode_t *inode) {
+struct log_info {
+    k_t key;
+    int pos;
+};
+
+static
+
+static inline void i_split(shim_cli_t *shim_cli, inode_t *inode, k_t cut) {
+    struct log_info logs[INODE_FANOUT];
+    uint64_t valp;
+    int pos;
+
+    for_each_set_bit(pos, &inode->validmap, INODE_FANOUT) {
+        logger_get(shim_cli->logger_cli, inode->logs[pos], &logs[pos].key, &valp);
+        logs[pos].pos = pos;
+    }
 }
 
-static inline void i_split(shim_cli_t *shim_cli, inode_t *inode) {
-
-}
-
-/* TODO: SIMD-optimize */
 static inline void prefetch_log(shim_cli_t *shim_cli, inode_t *inode, k_t key) {
     uint8_t fgprt = k_fgprt(shim_cli->kc, key);
     int i;
@@ -161,7 +171,6 @@ static inline void prefetch_log(shim_cli_t *shim_cli, inode_t *inode, k_t key) {
     }
 }
 
-/* TODO: SIMD-optimize */
 static inline int search_log(shim_cli_t *shim_cli, inode_t *inode, k_t key, uint64_t *valp, int *pos) {
     uint8_t fgprt = k_fgprt(shim_cli->kc, key);
     int i, ret = -ERANGE;
@@ -218,7 +227,6 @@ int shim_upsert(shim_cli_t *shim_cli, k_t key, oplog_t log) {
         pos = find_first_zero_bit(&validmap, INODE_FANOUT);
 
         if (unlikely(pos == INODE_FANOUT)) {
-            /* TODO: add split and gc code */
             /* Inode full, need to split. */
             i_split(shim_cli, inode);
 
