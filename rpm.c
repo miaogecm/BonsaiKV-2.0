@@ -226,6 +226,8 @@ struct rpma {
 
     allocator_t *allocator;
     bool allocator_created;
+
+    bool dom_replicate;
 };
 
 struct rpma_cli {
@@ -914,6 +916,7 @@ rpma_t *rpma_create(const char *host, const char *dev_ip, int interval_us) {
 
     rpma->host = host;
     rpma->dev_ip = dev_ip;
+    rpma->dom_replicate = true;
     register_epoch_timer(interval_us);
 
 out:
@@ -1200,7 +1203,7 @@ static inline void *push_operand(rpma_cli_t *cli, void *start, size_t len) {
     return p;
 }
 
-static inline void *get_operand(rpma_cli_t *cli, uint32_t *lkey, void *start, size_t len) {
+static inline void *get_operand(rpma_cli_t *cli, uint32_t *lkey, void *start, size_t len, bool read) {
     struct ibv_mr *mr;
     void *operand;
 
@@ -1210,7 +1213,12 @@ static inline void *get_operand(rpma_cli_t *cli, uint32_t *lkey, void *start, si
         goto out;
     }
 
-    /* TODO: copy for read ops */
+    if (unlikely(read)) {
+        pr_err("remote read should use allocated buffer: %p", start);
+        operand = ERR_PTR(-EINVAL);
+        goto out_err;
+    }
+
     operand = push_operand(cli, start, len);
     if (unlikely(IS_ERR(operand))) {
         goto out_err;
@@ -1224,7 +1232,7 @@ out_err:
     return operand;
 }
 
-static inline struct ibv_sge *get_sg_list(rpma_cli_t *cli, rpma_buf_t *buf, int *nr) {
+static inline struct ibv_sge *get_sg_list(rpma_cli_t *cli, rpma_buf_t *buf, int *nr, bool read) {
     struct ibv_sge *sglist;
     int i, cnt = 0;
     void *addr;
@@ -1242,7 +1250,7 @@ static inline struct ibv_sge *get_sg_list(rpma_cli_t *cli, rpma_buf_t *buf, int 
     }
 
     for (i = 0; i < cnt; i++) {
-        addr = get_operand(cli, &sglist[i].lkey, buf[i].start, buf[i].size);
+        addr = get_operand(cli, &sglist[i].lkey, buf[i].start, buf[i].size, read);
         sglist[i].addr = (uintptr_t) addr;
         sglist[i].length = buf[i].size;
         if (unlikely(IS_ERR(addr))) {
@@ -1278,7 +1286,7 @@ int rpma_wr_(rpma_cli_t *cli, rpma_ptr_t dst, rpma_buf_t src[], rpma_flag_t flag
         goto out;
     }
 
-    sgl = get_sg_list(cli, src, &num_sge);
+    sgl = get_sg_list(cli, src, &num_sge, false);
     if (unlikely(IS_ERR(sgl))) {
         ret = PTR_ERR(sgl);
         pr_err("failed to get sg list: %s", strerror(-ret));
@@ -1306,87 +1314,150 @@ out:
     return ret;
 }
 
-static inline int replicate(rpma_cli_t *cli, void *replica, rpma_ptr_t src) {
-    int ret = 0, num_sge, i;
-    struct ibv_send_wr *wr;
-    struct ibv_sge *sgl;
+static inline int replicate(rpma_cli_t *cli, void *segment, rpma_ptr_t src) {
+    struct segment_info *si;
+    struct ibv_send_wr wr;
+    int ret, i, new_epoch;
+    struct ibv_sge sgl;
     size_t target_off;
     void *data;
 
-    data = malloc(cli->segment_size * cli->nr_doms);
+    /* replicate data for nr_doms times */
+    data = push_operand(cli, NULL, cli->segment_size * cli->nr_doms);
     if (unlikely(!data)) {
         ret = -ENOMEM;
         pr_err("failed to allocate memory for replica: %s", strerror(-ret));
         goto out;
     }
     for (i = 0; i < cli->nr_doms; i++) {
-        memcpy(data + i * cli->segment_size, replica, cli->segment_size);
+        memcpy(data + i * cli->segment_size, segment, cli->segment_size);
     }
 
+    /* calculate offset in interleaved view */
     target_off = src.off * cli->nr_doms;
 
-    sgl = get_sg_list(cli, rpma_buflist(cli, data, cli->segment_size * cli->nr_doms), &num_sge);
-    if (unlikely(IS_ERR(sgl))) {
-        ret = PTR_ERR(sgl);
-        pr_err("failed to get sg list: %s", strerror(-ret));
+    sgl.addr = (uintptr_t) data;
+    sgl.length = cli->segment_size * cli->nr_doms;
+    sgl.lkey = cli->mrs[0]->lkey;
+
+    wr.opcode = IBV_WR_RDMA_WRITE;
+    wr.wr_id = 0;
+    wr.sg_list = &sgl;
+    wr.num_sge = 1;
+    wr.wr.rdma.remote_addr = target_off;
+    wr.wr.rdma.rkey = cli->repmr_key;
+
+    if (unlikely(ibv_post_send(cli->qp, &wr, NULL))) {
+        pr_err("failed to post wr");
+        ret = -EINVAL;
         goto out;
     }
 
-    wr = calloc(1, sizeof(*wr));
-    if (unlikely(!wr)) {
-        free(sgl);
-        ret = -ENOMEM;
-        pr_err("failed to allocate memory for send WR: %s", strerror(-ret));
+    ret = rpma_sync(cli);
+    if (unlikely(ret)) {
+        pr_err("failed to sync: %s", strerror(-ret));
         goto out;
     }
 
-    wr->opcode = IBV_WR_RDMA_WRITE;
-    wr->wr_id = 0;
-    wr->sg_list = sgl;
-    wr->num_sge = num_sge;
-    wr->wr.rdma.remote_addr = target_off;
-    wr->wr.rdma.rkey = cli->repmr_key;
-
-    insert_into_wr_list(cli, wr);
+    /* upadte epoch */
+    new_epoch = ACCESS_ONCE(epoch);
+    for (i = 0; i < cli->nr_doms; i++) {
+        si = &cli->doms[i].dir->seginfos[src.off / cli->segment_size];
+        WRITE_ONCE(si->epoch, new_epoch);
+    }
 
 out:
     return ret;
 }
 
-static inline int rd_segment_fastpath(rpma_cli_t *cli, void *buf, rpma_ptr_t src, rpma_flag_t flag) {
+static int do_rd_segment(rpma_cli_t *cli, void *dst, rpma_ptr_t src) {
+    struct ibv_send_wr wr;
+    struct ibv_sge sgl;
+    struct ibv_mr *mr;
+    int ret = 0;
+
+    if (unlikely(src.off >= cli->logical_size)) {
+        ret = -EINVAL;
+        pr_err("invalid source ptr: %lu", src.rawp);
+        goto out;
+    }
+
+    mr = get_mr(cli, dst, cli->segment_size);
+    if (unlikely(!mr)) {
+        ret = -EINVAL;
+        pr_err("invalid destination ptr: %p", dst);
+        goto out;
+    }
+
+    sgl.addr = (uintptr_t) dst;
+    sgl.length = cli->segment_size;
+    sgl.lkey = mr->lkey;
+
+    wr.opcode = IBV_WR_RDMA_READ;
+    wr.wr_id = 0;
+    wr.sg_list = &sgl;
+    wr.num_sge = 1;
+    wr.wr.rdma.remote_addr = src.off;
+    wr.wr.rdma.rkey = cli.doms[src.home].mr_key;
+
+    if (unlikely(ibv_post_send(cli->qp, &wr, NULL))) {
+        pr_err("failed to post wr");
+        ret = -EINVAL;
+        goto out;
+    }
+
+    ret = rpma_sync(cli);
+
+out:
+    return ret;
+}
+
+int rpma_rd_segment(rpma_cli_t *cli, void *dst, rpma_ptr_t src) {
     struct dom_dir *dir = cli->doms[cli->local_dom].dir;
     struct segment_info *si;
-    int now_epoch;
+    int now_epoch, ret;
     size_t seg;
-    void *data;
 
+    if (unlikely(src.off >= cli->logical_size || src.off % cli->segment_size != 0)) {
+        ret = -EINVAL;
+        pr_err("invalid source ptr: %lu", src.rawp);
+        goto out;
+    }
+
+    /* domain replication not enabled */
+    if (unlikely(!cli->rpma->dom_replicate)) {
+        ret = do_rd_segment(cli, dst, src);
+        goto out;
+    }
+
+    /* calculate segment and get segment info */
     seg = src.off / cli->segment_size;
     si = &dir->seginfos[seg];
 
+    /* if segment replica still valid */
     now_epoch = ACCESS_ONCE(epoch);
-    if (now_epoch > si->epoch + 1) {
-        /* At lease one epoch in between. It's invalidated. */
-        data = push_operand(cli, NULL, cli->segment_size);
+    if (now_epoch <= si->epoch + 1) {
+        /* read from local domain */
+        ret = do_rd_segment(cli, dst, (rpma_ptr_t) { cli->local_dom, src.off });
 
-        /* read segment */
-        rpma_rd(cli, src, 0, data, cli->segment_size);
-
-        /* replicate segment to all domains actively */
-        replicate(cli, data, src);
-
-        /* update metadata */
-        si->epoch = now_epoch;
-
-        memcpy(buf, data, cli->segment_size);
-
-        return 0;
+        now_epoch = ACCESS_ONCE(epoch);
+        if (likely(now_epoch <= si->epoch + 1)) {
+            goto out;
+        }
     }
 
-    /* read from local domain */
-    src.home = cli->local_dom;
-    rpma_rd(cli, src, 0, buf, cli->segment_size);
+    /* read segment */
+    ret = do_rd_segment(cli, dst, src);
+    if (unlikely(ret)) {
+        pr_err("failed to read segment: %s", strerror(-ret));
+        goto out;
+    }
 
-    return 0;
+    /* replicate segment to all domains actively */
+    replicate(cli, dst, src);
+
+out:
+    return ret;
 }
 
 int rpma_rd_(rpma_cli_t *cli, rpma_buf_t dst[], rpma_ptr_t src, rpma_flag_t flag) {
@@ -1396,16 +1467,11 @@ int rpma_rd_(rpma_cli_t *cli, rpma_buf_t dst[], rpma_ptr_t src, rpma_flag_t flag
 
     if (unlikely(src.off >= cli->logical_size)) {
         ret = -EINVAL;
-        pr_err("invalid source offset: %lu", src);
+        pr_err("invalid source ptr: %lu", src.rawp);
         goto out;
     }
 
-    if (!dst[1].start && dst[0].size == cli->segment_size && src.off % cli->segment_size == 0) {
-        ret = rd_segment_fastpath(cli, dst[0].start, src, flag);
-        goto out;
-    }
-
-    sgl = get_sg_list(cli, dst, &num_sge);
+    sgl = get_sg_list(cli, dst, &num_sge, true);
     if (unlikely(IS_ERR(sgl))) {
         ret = PTR_ERR(sgl);
         pr_err("failed to get sg list: %s", strerror(-ret));
