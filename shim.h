@@ -21,7 +21,7 @@ typedef struct shim shim_t;
 typedef struct shim_cli shim_cli_t;
 typedef struct inode inode_t;
 
-shim_t *shim_create(index_t *index);
+shim_t *shim_create(index_t *index, kc_t *kc);
 void shim_destroy(shim_t *shim);
 
 shim_cli_t *shim_create_cli(shim_t *shim, perf_t *perf, logger_cli_t *logger_cli);

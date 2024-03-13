@@ -146,6 +146,16 @@ struct spair {
     size_t skip;
 };
 
+struct svr_dom {
+    struct pm_dev *devs;
+    int id;
+
+    in_addr_t ip;
+    in_port_t port;
+
+    struct cm *cm;
+};
+
 struct rpma_svr {
     int nr_doms, nr_devs_per_dom;
 
@@ -159,14 +169,13 @@ struct rpma_svr {
     struct svr_dom doms[];
 };
 
-struct svr_dom {
-    struct pm_dev *devs;
+struct cm_dom {
     int id;
-
-    in_addr_t ip;
-    in_port_t port;
-
     struct cm *cm;
+    struct svr_dom *dom;
+    struct ibv_mr **base_mrs;
+    /* per-client temporary variable */
+    uint32_t lkey, rkey;
 };
 
 struct cm {
@@ -185,15 +194,6 @@ struct cm {
     struct cm_dom doms[];
 };
 
-struct cm_dom {
-    int id;
-    struct cm *cm;
-    struct svr_dom *dom;
-    struct ibv_mr **base_mrs;
-    /* per-client temporary variable */
-    uint32_t lkey, rkey;
-};
-
 /*
  * RPMA client-side data structures
  */
@@ -208,7 +208,7 @@ struct segment_info {
  * Domain cache directory saves information about each segment
  */
 struct dom_dir {
-    struct segment_info seginfos[];
+    struct segment_info seginfos[0];
 };
 
 struct cli_dom {
@@ -538,7 +538,7 @@ out:
     return ret;
 }
 
-static inline int handle_event_established(rpma_svr_t *svr, struct rdma_cm_id *cli_id) {
+static inline int handle_event_established(struct cm *cm, struct rdma_cm_id *cli_id) {
     pr_debug(10, "handle event established");
 }
 
@@ -664,7 +664,7 @@ out_destroy_channel:
     rdma_destroy_event_channel(cm_chan);
 
 out:
-    return ret;
+    return NULL;
 }
 
 static inline int get_nr_occur(const int *arr, int size, int val) {
@@ -1282,7 +1282,7 @@ int rpma_wr_(rpma_cli_t *cli, rpma_ptr_t dst, rpma_buf_t src[], rpma_flag_t flag
 
     if (unlikely(dst.off >= cli->logical_size)) {
         ret = -EINVAL;
-        pr_err("invalid destination offset: %lu", dst.off);
+        pr_err("invalid destination offset");
         goto out;
     }
 
@@ -1398,7 +1398,7 @@ static int do_rd_segment(rpma_cli_t *cli, void *dst, rpma_ptr_t src) {
     wr.sg_list = &sgl;
     wr.num_sge = 1;
     wr.wr.rdma.remote_addr = src.off;
-    wr.wr.rdma.rkey = cli.doms[src.home].mr_key;
+    wr.wr.rdma.rkey = cli->doms[src.home].mr_key;
 
     if (unlikely(ibv_post_send(cli->qp, &wr, NULL))) {
         pr_err("failed to post wr");
@@ -1504,7 +1504,7 @@ int rpma_flush(rpma_cli_t *cli, rpma_ptr_t dst, size_t size, rpma_flag_t flag) {
     if (unlikely(IS_ERR(buf))) {
         return PTR_ERR(buf);
     }
-    return rpma_rd(cli, off, flag, buf, 1);
+    return rpma_rd(cli, dst, flag, buf, 1);
 }
 
 int rpma_commit(rpma_cli_t *cli) {

@@ -98,8 +98,12 @@ extern int debug_level;
 
 #define ARRAY_LEN(arr)      (sizeof(arr) / sizeof((arr)[0]))
 
+#ifndef __cplusplus
+
 #define max(x, y)           ((x) > (y) ? (x) : (y))
 #define min(x, y)           ((x) < (y) ? (x) : (y))
+
+#endif
 
 static inline void __read_once_size(const volatile void *p, void *res, int size) {
     switch (size) {
@@ -152,6 +156,8 @@ static inline pid_t current_tid() {
     return syscall(SYS_gettid);
 }
 
+#ifndef __cplusplus
+
 static inline int memncmp(const char *key1, size_t size1, const char *key2, size_t size2) {
     int ret = memcmp(key1, key2, min(size1, size2));
     if (ret) {
@@ -162,6 +168,8 @@ static inline int memncmp(const char *key1, size_t size1, const char *key2, size
     }
     return size1 > size2;
 }
+
+#endif
 
 #define clflush(addr)\
 asm volatile("clflush %0" : "+m" (*(volatile char *)(addr)))
@@ -178,6 +186,8 @@ static inline void flush_range(void* buf, uint32_t len) {
 	}
 }
 
+#ifndef UTILS_NO_PREFETCH
+
 static inline void prefetch(const void *ptr) {
 	typedef struct { char x[CACHELINE_SIZE]; } cacheline_t;
 	asm volatile("prefetcht0 %0" : : "m" (*(const cacheline_t *)ptr));
@@ -187,6 +197,8 @@ static inline void prefetchnta(const void *ptr) {
 	typedef struct { char x[CACHELINE_SIZE]; } cacheline_t;
 	asm volatile("prefetchnta %0" : : "m" (*(const cacheline_t *)ptr));
 }
+
+#endif
 
 static inline void prefetch_range(void* buf, uint32_t len) {
 	uint32_t i;

@@ -6,8 +6,7 @@
  * Hohai University
  */
 
-#include "utils.h"
-#include "k.h"
+#define UTILS_NO_PREFETCH
 
 #include "masstree/config.h"
 #include "masstree/compiler.hh"
@@ -24,6 +23,9 @@
 #include "masstree/string.cc"
 #include "masstree/straccum.cc"
 #include "masstree/kvthread.cc"
+
+#include "utils.h"
+#include "k.h"
 
 typedef void index_t;
 

@@ -11,7 +11,6 @@
 
 #include "perf.h"
 #include "rpm.h"
-#include "lpm.h"
 
 typedef struct gc_cli gc_cli_t;
 

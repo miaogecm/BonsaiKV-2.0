@@ -56,7 +56,7 @@ struct mnode {
 };
 
 struct enode {
-    struct entry entries[];
+    struct entry entries[0];
 };
 
 struct fnode {
@@ -174,7 +174,7 @@ static inline size_t bptr2off(dcli_t *dcli, void *ptr) {
     if (ptr == NULL) {
         return BNULL;
     }
-    return (char *) ptr - dcli->bdev->start;
+    return ptr - dcli->bdev->start;
 }
 
 static inline void bread(dcli_t *dcli, void *buf, size_t len, size_t off) {
@@ -519,11 +519,10 @@ static int dnode_lookup(dcli_t *dcli, rpma_ptr_t dnode, k_t key, uint64_t *valp)
     if (unlikely(ret < 0)) {
         pr_err("failed to commit mnode read: %s", strerror(-ret));
         rpma_buf_free(dcli->rpma_cli, mnode, dcli->dstrip_size);
-        mnode = ERR_PTR(ret);
     }
 
 out:
-    return mnode;
+    return ret;
 }
 
 static int bnode_lookup(dcli_t *dcli, size_t bnode, k_t key, uint64_t *valp) {

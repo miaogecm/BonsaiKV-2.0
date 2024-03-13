@@ -16,8 +16,6 @@
   const typeof( ((type *)0)->member ) *__mptr = (ptr);    \
   (type *)( (char *)__mptr - offsetof(type,member) );})
 
-static inline void prefetch(const void *x) {;}
-
 /*
  * These are non-NULL pointers that will result in page faults
  * under normal circumstances, used to verify that nobody uses

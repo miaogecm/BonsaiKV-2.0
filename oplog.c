@@ -326,7 +326,7 @@ out:
 void logger_prefetch(logger_cli_t *logger_cli, oplog_t log) {
     struct oplog_ptr o = { .raw = log };
     logger_cli_t *target_cli;
-    struct oplog_data *log;
+    struct oplog_data *data;
     struct lcb *lcb;
 
     /* get the client of the oplog */
@@ -339,21 +339,21 @@ void logger_prefetch(logger_cli_t *logger_cli, oplog_t log) {
     if (likely(o.off < lcb->start)) {
         /* in PM */
         bonsai_assert(o.off < target_cli->log_region_size);
-        log = target_cli->log_region + o.off;
+        data = target_cli->log_region + o.off;
     } else {
         /* in LCB */
         bonsai_assert(o.off - lcb->start < target_cli->lcb_size);
-        log = (void *) lcb->data + (o.off - lcb->start);
+        data = (void *) lcb->data + (o.off - lcb->start);
     }
 
     /* prefetch log */
-    prefetch_range(log, sizeof(*log) + log->key_len);
+    prefetch_range(data, sizeof(*data) + data->key_len);
 }
 
 op_t logger_get(logger_cli_t *logger_cli, oplog_t log, k_t *key, uint64_t *valp) {
     struct oplog_ptr o = { .raw = log };
     logger_cli_t *target_cli;
-    struct oplog_data *log;
+    struct oplog_data *data;
     struct lcb *lcb;
     op_t op;
 
@@ -367,18 +367,18 @@ op_t logger_get(logger_cli_t *logger_cli, oplog_t log, k_t *key, uint64_t *valp)
     if (likely(o.off < lcb->start)) {
         /* in PM */
         bonsai_assert(o.off < target_cli->log_region_size);
-        log = target_cli->log_region + o.off;
+        data = target_cli->log_region + o.off;
     } else {
         /* in LCB */
         bonsai_assert(o.off - lcb->start < target_cli->lcb_size);
-        log = (void *) lcb->data + (o.off - lcb->start);
+        data = (void *) lcb->data + (o.off - lcb->start);
     }
 
     /* get log pointer */
-    op = log->op;
-    key->key = log->key;
-    key->len = log->key_len;
-    *valp = log->valp;
+    op = data->op;
+    key->key = data->key;
+    key->len = data->key_len;
+    *valp = data->valp;
 
 out:
     return op;

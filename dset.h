@@ -40,7 +40,7 @@ dset_t *dset_create(kc_t *kc,
 void dset_destroy(dset_t *dset);
 
 dcli_t *dcli_create(dset_t *dset, dgroup_map_update_fn gm_updator, dgroup_map_lookup_fn gm_lookuper,
-                    void *priv, perf_t *perf, int dom_affinity);
+                    void *priv, perf_t *perf);
 void dcli_destroy(dcli_t *dcli);
 
 int dset_upsert(dcli_t *dcli, dgroup_t dgroup, k_t key, uint64_t valp);
