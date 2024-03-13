@@ -636,12 +636,12 @@ static int *get_order_arr(dcli_t *dcli, int *nr, size_t bnode, struct mnode *mno
  *     prev->next                   (no need to persist, can be recovered)
  *     (durable point)
  */
-static int bnode_split_median(dcli_t *dcli, dgroup_t dgroup, size_t *new_bnode, k_t key) {
+static int bnode_split_median(dcli_t *dcli, dgroup_t dgroup, size_t *new_bnode, k_t key, k_t split_key) {
     struct mnode *prev, *next, *mnode, *mleft, *mright;
     struct enode *enode, *eleft, *eright;
     struct fnode *fnode, *fleft, *fright;
     int *order, nr, ret = 0, i, pos;
-    k_t split_key, lfence, rfence;
+    k_t lfence, rfence;
     size_t base;
 
     /* get mnode and enode address */
@@ -659,8 +659,16 @@ static int bnode_split_median(dcli_t *dcli, dgroup_t dgroup, size_t *new_bnode, 
     }
 
     /* get split key */
-    pos = nr / 2;
-    split_key = e_key(dcli, &enode->entries[order[pos]]);
+    if (split_key.key) {
+        pos = nr / 2;
+        split_key = e_key(dcli, &enode->entries[order[pos]]);
+    } else {
+        for (pos = 0; pos < nr; pos++) {
+            if (k_cmp(dcli->kc, key, e_key(dcli, &enode->entries[order[pos]])) <= 0) {
+                break;
+            }
+        }
+    }
 
     /* create new mnodes */
     base = dcli->bnode_size + sizeof(struct fnode) + split_key.len;
