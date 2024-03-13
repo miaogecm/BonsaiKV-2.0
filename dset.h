@@ -30,8 +30,8 @@ typedef struct dgroup dgroup_t;
 #endif
 typedef struct dcli dcli_t;
 typedef struct dset dset_t;
-typedef int (*dgroup_map_update_fn)(void *priv, k_t s, k_t t, dgroup_t group);
-typedef int (*dgroup_map_lookup_fn)(void *priv, dgroup_t *group, k_t k);
+
+struct shim_cli;
 
 dset_t *dset_create(kc_t *kc,
                     size_t bnode_size, size_t cnode_size,
@@ -39,8 +39,7 @@ dset_t *dset_create(kc_t *kc,
                     size_t pstage_sz, int max_gc_prefetch);
 void dset_destroy(dset_t *dset);
 
-dcli_t *dcli_create(dset_t *dset, dgroup_map_update_fn gm_updator, dgroup_map_lookup_fn gm_lookuper,
-                    void *priv, perf_t *perf);
+dcli_t *dcli_create(dset_t *dset, void *priv, perf_t *perf, struct shim_cli *shim_cli);
 void dcli_destroy(dcli_t *dcli);
 
 int dset_upsert(dcli_t *dcli, dgroup_t dgroup, k_t key, uint64_t valp);

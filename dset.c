@@ -19,6 +19,7 @@
 #include "atomic.h"
 #include "alloc.h"
 #include "dset.h"
+#include "shim.h"
 #include "pm.h"
 #include "k.h"
 
@@ -89,8 +90,6 @@ struct dset {
 struct dcli {
     dset_t *dset;
 
-    dgroup_map_lookup_fn gm_lookuper;
-    dgroup_map_update_fn gm_updator;
     void *priv;
 
     struct pm_dev *bdev;
@@ -108,6 +107,8 @@ struct dcli {
     unsigned seed;
 
     struct mnode *prefetched_mnode;
+
+    shim_cli_t *shim_cli;
 };
 
 dset_t *dset_create(kc_t *kc,
@@ -308,7 +309,7 @@ static inline int create_sentinel(dcli_t *dcli) {
     /* init dgroup map */
     dgroup.bnode = dset->sentinel_bnode;
     dgroup.dnode = dset->sentinel_dnode;
-    ret = dcli->gm_updator(dcli->priv, dcli->kc->min, dcli->kc->max, dgroup);
+    ret = shim_update_dgroup(dcli->shim_cli, dcli->kc->min, dcli->kc->max, dgroup);
     if (unlikely(ret)) {
         pr_err("failed to init dgroup map: %s", strerror(-ret));
         goto out;
@@ -321,8 +322,7 @@ out:
     return ret;
 }
 
-dcli_t *dcli_create(dset_t *dset, dgroup_map_update_fn gm_updator, dgroup_map_lookup_fn gm_lookuper,
-                    void *priv, perf_t *perf) {
+dcli_t *dcli_create(dset_t *dset, void *priv, perf_t *perf, shim_cli_t *shim_cli) {
     size_t dstripe_size = UINT64_MAX;
     dcli_t *dcli;
     int ret, i;
@@ -335,8 +335,6 @@ dcli_t *dcli_create(dset_t *dset, dgroup_map_update_fn gm_updator, dgroup_map_lo
 
     dcli->dset = dset;
 
-    dcli->gm_lookuper = gm_lookuper;
-    dcli->gm_updator = gm_updator;
     dcli->priv = priv;
 
     dcli->perf = perf;
@@ -383,6 +381,8 @@ dcli_t *dcli_create(dset_t *dset, dgroup_map_update_fn gm_updator, dgroup_map_lo
     }
 
     dcli->pstage_sz = dset->pstage_sz;
+
+    dcli->shim_cli = shim_cli;
 
     /* create sentinel bnode and dnode if necessary */
     if (cmpxchg2(&dset->sentinel_created, false, true)) {
@@ -729,13 +729,13 @@ static int bnode_split_median(dcli_t *dcli, dgroup_t dgroup, size_t *new_bnode, 
 
     /* make new bnode visible to upper layer */
     dgroup.bnode = bptr2off(dcli, mleft);
-    ret = dcli->gm_updator(dcli->priv, lfence, split_key, dgroup);
+    ret = shim_update_dgroup(dcli->shim_cli, lfence, split_key, dgroup);
     if (unlikely(ret)) {
         pr_err("failed to update dgroup map: %s", strerror(-ret));
         goto out;
     }
     dgroup.bnode = bptr2off(dcli, mright);
-    ret = dcli->gm_updator(dcli->priv, split_key, rfence, dgroup);
+    ret = shim_update_dgroup(dcli->shim_cli, split_key, rfence, dgroup);
     if (unlikely(ret)) {
         pr_err("failed to update dgroup map: %s", strerror(-ret));
         goto out;
@@ -863,7 +863,7 @@ static inline int gc_bnodes(dcli_t *dcli) {
     rfence = get_rfence(dcli, get_bfnode(dcli, hmnode));
 
     /* get the corresponding dnode */
-    ret = dcli->gm_lookuper(dcli->priv, &dgroup, lfence);
+    ret = shim_lookup_dgroup(dcli->shim_cli, lfence, &dgroup);
     if (unlikely(ret)) {
         pr_err("failed to lookup dgroup map: %s", strerror(-ret));
         goto out;
