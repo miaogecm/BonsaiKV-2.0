@@ -12,14 +12,17 @@
 #include <urcu.h>
 #include <numa.h>
 
+#include "alloc.h"
 #include "oplog.h"
 #include "lock.h"
 #include "list.h"
+#include "pm.h"
 
 #define NR_CLIS_MAX      1024
 
 struct logger_shard {
-    lpma_t *lpma;
+    struct pm_dev *dev;
+    allocator_t *allocator;
     /* clients bind to this shard */
     int nr_clis;
 };
@@ -77,7 +80,6 @@ struct logger_cli {
     struct lcb *lcb;
     size_t lcb_size;
 
-    lpma_cli_t *lpma_cli;
     void *log_region;
     size_t log_region_size;
 };
@@ -96,7 +98,7 @@ struct logger_barrier {
     struct logger_cli_barrier cli_barriers[];
 };
 
-logger_t *logger_create(kc_t *kc, int nr_shards, lpma_t **lpmas, size_t lcb_size) {
+logger_t *logger_create(kc_t *kc, int nr_shards, const char *shard_devs[], size_t lcb_size) {
     logger_t *logger;
     int i;
 
@@ -127,7 +129,18 @@ logger_t *logger_create(kc_t *kc, int nr_shards, lpma_t **lpmas, size_t lcb_size
     logger->lcb_size = lcb_size;
 
     for (i = 0; i < nr_shards; i++) {
-        logger->shards[i].lpma = lpmas[i];
+        logger->shards[i].dev = pm_open_devs(nr_shards, shard_devs);
+        if (unlikely(!logger->shards[i].dev)) {
+            logger = ERR_PTR(-ENODEV);
+            pr_err("failed to open PM device: %s", shard_devs[i]);
+            goto out;
+        }
+        logger->shards[i].allocator = allocator_create(logger->shards[i].dev->size);
+        if (unlikely(!logger->shards[i].allocator)) {
+            logger = ERR_PTR(-ENOMEM);
+            pr_err("failed to create allocator for PM device: %s", shard_devs[i]);
+            goto out;
+        }
         logger->shards[i].nr_clis = 0;
     }
 
@@ -153,7 +166,7 @@ static inline bool is_local_socket(int socket) {
     return numa_node_of_cpu(sched_getcpu()) == socket;
 }
 
-static inline lpma_t *find_cli_dev(logger_t *logger) {
+static inline struct logger_shard *find_cli_shard(logger_t *logger) {
     struct logger_shard *shard;
     int i, nr_clis;
 
@@ -163,7 +176,7 @@ static inline lpma_t *find_cli_dev(logger_t *logger) {
     shard = NULL;
     nr_clis = INT32_MAX;
     for (i = 0; i < logger->nr_shards; i++) {
-        if (logger->shards[i].nr_clis < nr_clis && is_local_socket(lpma_socket(logger->shards[i].lpma))) {
+        if (logger->shards[i].nr_clis < nr_clis && is_local_socket(logger->shards[i].dev->socket)) {
             shard = &logger->shards[i];
             nr_clis = shard->nr_clis;
         }
@@ -178,13 +191,13 @@ static inline lpma_t *find_cli_dev(logger_t *logger) {
 
     spin_unlock(&logger->lock);
 
-    return shard->lpma;
+    return shard;
 }
 
 logger_cli_t *logger_cli_create(logger_t *logger, perf_t *perf, size_t log_region_size, int id) {
+    struct logger_shard *shard;
     logger_cli_t *cli;
     uint64_t logs_off;
-    lpma_t *lpma;
 
     cli = calloc(1, sizeof(*cli));
     if (unlikely(cli == NULL)) {
@@ -200,26 +213,20 @@ logger_cli_t *logger_cli_create(logger_t *logger, perf_t *perf, size_t log_regio
 
     cli->lcb_size = logger->lcb_size;
 
-    lpma = find_cli_dev(logger);
-    if (unlikely(!lpma)) {
+    shard = find_cli_shard(logger);
+    if (unlikely(!shard)) {
         cli = ERR_PTR(-ENODEV);
-        pr_err("failed to find suitable logger LPMA");
-        goto out;
-    }
-    cli->lpma_cli = lpma_cli_create(lpma, perf);
-    if (unlikely(!cli->lpma_cli)) {
-        cli = ERR_PTR(-ENOMEM);
-        pr_err("failed to create lpma_cli");
+        pr_err("failed to find suitable logger shard");
         goto out;
     }
 
-    logs_off = lpma_alloc(cli->lpma_cli, log_region_size);
+    logs_off = allocator_alloc(shard->allocator, log_region_size);
     if (unlikely(IS_ERR(logs_off))) {
         cli = ERR_PTR(logs_off);
         pr_err("failed to allocate memory for logs: %s", strerror(-PTR_ERR(logs_off)));
         goto out;
     }
-    cli->log_region = lpma_get_ptr(cli->lpma_cli, logs_off);
+    cli->log_region = shard->dev->start + logs_off;
     cli->log_region_size = log_region_size;
 
     logger->clis[id] = cli;
