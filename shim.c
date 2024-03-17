@@ -20,6 +20,8 @@
 struct shim {
     index_t *index;
     kc_t *kc;
+
+    inode_t *sentinel;
 };
 
 struct shim_cli {
@@ -56,6 +58,27 @@ struct inode {
     char fences[];
 };
 
+static inline inode_t *create_sentinel(shim_t *shim) {
+    inode_t *sentinel;
+
+    sentinel = calloc(1, sizeof(*sentinel) + 1);
+    if (unlikely(!sentinel)) {
+        sentinel = ERR_PTR(-ENOMEM);
+        pr_err("failed to allocate sentinel memory");
+        goto out;
+    }
+
+    sentinel->validmap = 0;
+    sentinel->deleted = 0;
+    sentinel->next = NULL;
+    sentinel->dgroup = (dgroup_t) { };
+    seqcount_init(&sentinel->seq);
+    spin_lock_init(&sentinel->lock);
+
+out:
+    return sentinel;
+}
+
 shim_t *shim_create(index_t *index, kc_t *kc) {
     shim_t *shim;
 
@@ -69,6 +92,11 @@ shim_t *shim_create(index_t *index, kc_t *kc) {
     shim->index = index;
 
     shim->kc = kc;
+
+    shim->sentinel = create_sentinel(shim);
+    if (unlikely(IS_ERR(shim->sentinel))) {
+        pr_err("failed to create sentinel");
+    }
 
 out:
     return shim;
@@ -96,6 +124,10 @@ shim_cli_t *shim_create_cli(shim_t *shim, perf_t *perf, logger_cli_t *logger_cli
 
 out:
     return shim_cli;
+}
+
+void shim_set_dcli(shim_cli_t *shim_cli, dcli_t *dcli) {
+    shim_cli->dcli = dcli;
 }
 
 void shim_destroy_cli(shim_cli_t *shim_cli) {
@@ -147,7 +179,7 @@ reget:
         inode = next;
     }
 
-    return 0;
+    return inode;
 }
 
 struct log_info {
@@ -236,17 +268,6 @@ static inline void i_split(shim_cli_t *shim_cli, inode_t *inode, k_t cut) {
     index_upsert(shim_cli->index, fence, new);
 }
 
-static inline void prefetch_log(shim_cli_t *shim_cli, inode_t *inode, k_t key) {
-    uint8_t fgprt = k_fgprt(shim_cli->kc, key);
-    int i;
-
-    for (i = 0; i < INODE_FANOUT; i++) {
-        if (inode->fgprt[i] == fgprt) {
-            logger_prefetch(shim_cli->logger_cli, inode->logs[i]);
-        }
-    }
-}
-
 static inline int search_log(shim_cli_t *shim_cli, inode_t *inode, k_t key, uint64_t *valp, int *pos) {
     uint8_t fgprt = k_fgprt(shim_cli->kc, key);
     int i, ret = -ERANGE;
@@ -282,7 +303,7 @@ out:
 }
 
 static inline int search_dset(shim_cli_t *shim_cli, inode_t *inode, k_t key, uint64_t *valp) {
-    return -ENOENT;
+    return dset_lookup(shim_cli->dcli, inode->dgroup, key, valp);
 }
 
 int shim_upsert(shim_cli_t *shim_cli, k_t key, oplog_t log) {
@@ -368,10 +389,6 @@ retry:
         goto retry;
     }
 
-    /* prefetch for pipelining */
-    prefetch_log(shim_cli, inode, key);
-    dset_prefetch(shim_cli->dcli, inode->dgroup);
-
     ret = search_log(shim_cli, inode, key, valp, &pos);
 
     if (unlikely(read_seqcount_retry(&inode->seq, seq))) {
@@ -386,54 +403,64 @@ retry:
     return ret;
 }
 
-static int do_update_dgroup(shim_cli_t *shim_cli, inode_t *inode, k_t s, k_t t, dgroup_t dgroup) {
-    k_t lfence, rfence;
-    inode_t *next;
+int shim_update_dgroup(shim_cli_t *shim_cli, k_t s, k_t t, dgroup_t dgroup) {
+    k_t lfence, rfence, is, it;
+    inode_t *inode, *next;
 
-    /* dgroup already set */
-    if (dgroup_is_eq(inode->dgroup, dgroup)) {
-        goto next;
-    }
+    inode = iget_locked(shim_cli, s);
 
-    /* get inode fences */
-    lfence = i_lfence(inode);
-    rfence = i_rfence(inode);
+    for (; inode;) {
+        /* get inode fences */
+        lfence = i_lfence(inode);
+        rfence = i_rfence(inode);
 
-    /* get the overlapping part of [s, t) and [lfence, rfence) */
-    if (k_cmp(shim_cli->kc, s, lfence) < 0) {
-        s = lfence;
-    }
-    if (k_cmp(shim_cli->kc, t, rfence) > 0) {
-        t = rfence;
-    }
+        /* get the overlapping part of [s, t) and [lfence, rfence) */
+        is = s;
+        it = t;
+        if (k_cmp(shim_cli->kc, is, lfence) < 0) {
+            is = lfence;
+        }
+        if (k_cmp(shim_cli->kc, it, rfence) > 0) {
+            it = rfence;
+        }
 
-    /* split if s > lfence */
-    if (k_cmp(shim_cli->kc, s, lfence) > 0) {
-        i_split(shim_cli, inode, s);
+        /* no overlapping part, we stop */
+        if (unlikely(k_cmp(shim_cli->kc, is, it) >= 0)) {
+            spin_unlock(&inode->lock);
+            break;
+        }
+
+        /* dgroup already set */
+        if (dgroup_is_eq(inode->dgroup, dgroup)) {
+            goto next;
+        }
+
+        /* split if is > lfence */
+        if (k_cmp(shim_cli->kc, is, lfence) > 0) {
+            i_split(shim_cli, inode, is);
+            next = inode->next;
+            spin_unlock(&inode->lock);
+            inode = next;
+        }
+
+        /* split if it < rfence */
+        if (k_cmp(shim_cli->kc, it, rfence) < 0) {
+            i_split(shim_cli, inode, it);
+            spin_unlock(&inode->next->lock);
+        }
+
+        dgroup_copy(&inode->dgroup, dgroup);
+
+next:
         next = inode->next;
+        if (next) {
+            spin_lock(&next->lock);
+        }
         spin_unlock(&inode->lock);
         inode = next;
     }
 
-    /* split if t < rfence */
-    if (k_cmp(shim_cli->kc, t, rfence) < 0) {
-        i_split(shim_cli, inode, t);
-        spin_unlock(&inode->next->lock);
-    }
-
-    /* change dgroup */
-    inode->dgroup = dgroup;
-
-next:
-    if (unlikely(!inode->next)) {
-        return 0;
-    }
-
-    return do_update_dgroup(shim_cli, inode->next, s, t, dgroup);
-}
-
-int shim_update_dgroup(shim_cli_t *shim_cli, k_t s, k_t t, dgroup_t dgroup) {
-    return do_update_dgroup(shim_cli, iget_locked(shim_cli, s), s, t, dgroup);
+    return 0;
 }
 
 int shim_lookup_dgroup(shim_cli_t *shim_cli, k_t key, dgroup_t *dgroup) {
@@ -466,4 +493,26 @@ retry:
     }
 
     return ret;
+}
+
+void shim_scan(shim_cli_t *shim_cli, shim_log_scanner scanner, void *priv) {
+    inode_t *inode, *next;
+    k_t key;
+    uint64_t valp;
+    int pos;
+
+    for (inode = shim_cli->shim->sentinel; inode; inode = next) {
+        next = inode->next;
+        spin_lock(&inode->lock);
+        if (unlikely(inode->deleted)) {
+            spin_unlock(&inode->lock);
+            continue;
+        }
+        spin_unlock(&inode->lock);
+
+        for_each_set_bit(pos, &inode->validmap, INODE_FANOUT) {
+            logger_get(shim_cli->logger_cli, inode->logs[pos], &key, &valp);
+            scanner(inode->logs[pos], inode->dgroup, priv);
+        }
+    }
 }

@@ -68,6 +68,7 @@ extern int debug_level;
 #define likely(x)       __builtin_expect(!!(x), 1)
 #define unlikely(x)     __builtin_expect(!!(x), 0)
 
+#define ERR_CAST(x)     ((void *)(x))
 #define ERR_PTR(x)      ((void *)(long)(x))
 #define PTR_ERR(x)      ((long)(x))
 #define IS_ERR(x)       ((unsigned long)(x) >= (unsigned long)-4095)

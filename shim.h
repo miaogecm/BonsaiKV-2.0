@@ -25,6 +25,7 @@ shim_t *shim_create(index_t *index, kc_t *kc);
 void shim_destroy(shim_t *shim);
 
 shim_cli_t *shim_create_cli(shim_t *shim, perf_t *perf, logger_cli_t *logger_cli);
+void shim_set_dcli(shim_cli_t *shim_cli, dcli_t *dcli);
 void shim_destroy_cli(shim_cli_t *shim_cli);
 
 int shim_upsert(shim_cli_t *shim_cli, k_t key, oplog_t log);

@@ -6,6 +6,8 @@
  * Hohai University
  */
 
+#define _GNU_SOURCE
+
 #include "oplog.h"
 #include "shim.h"
 #include "dset.h"
@@ -22,6 +24,7 @@ struct gc_cli {
 
     bool exit;
     pthread_t gc_thread;
+    pid_t tid;
 
     size_t pm_high_watermark, pm_gc_size;
 };
@@ -99,6 +102,8 @@ static void *gc_thread(void *arg) {
     gc_cli_t *gc_cli = arg;
     size_t total;
 
+    gc_cli->tid = current_tid();
+
     pr_debug(5, "gc thread enter");
 
     while (!READ_ONCE(gc_cli->exit)) {
@@ -127,6 +132,7 @@ gc_cli_t *gc_cli_create(perf_t *perf, kc_t *kc,
                         logger_cli_t *logger_cli, shim_cli_t *shim_cli, dcli_t *dcli,
                         size_t pm_high_watermark, size_t pm_gc_size) {
     gc_cli_t *gc_cli;
+    int ret;
 
     gc_cli = calloc(1, sizeof(gc_cli_t));
     if (unlikely(!gc_cli)) {
@@ -146,10 +152,30 @@ gc_cli_t *gc_cli_create(perf_t *perf, kc_t *kc,
     gc_cli->pm_high_watermark = pm_high_watermark;
     gc_cli->pm_gc_size = pm_gc_size;
 
+    ret = pthread_create(&gc_cli->gc_thread, NULL, gc_thread, gc_cli);
+    if (unlikely(ret)) {
+        gc_cli = ERR_PTR(-ret);
+        pr_err("failed to create gc thread: %s", strerror(-ret));
+        goto out;
+    }
+
+    pthread_setname_np(gc_cli->gc_thread, "bonsai-gc");
+
+    while (!READ_ONCE(gc_cli->tid)) {
+        cpu_relax();
+    }
+
+    pr_debug(5, "gc created, tid=%d", gc_cli->tid);
+
 out:
     return gc_cli;
 }
 
 void gc_cli_destroy(gc_cli_t *gc_cli) {
+    pr_debug(5, "destroy gc");
+
+    gc_cli->exit = true;
+    pthread_join(gc_cli->gc_thread, NULL);
+
     free(gc_cli);
 }
