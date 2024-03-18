@@ -26,7 +26,11 @@ int kv_get(kv_cli_t *kv_cli, k_t key, uint64_t *valp);
 int kv_del(kv_cli_t *kv_cli, k_t key);
 int kv_scan(kv_cli_t *kv_cli, k_t key, int len);
 
+void kv_gc_logs(kv_t *kv);
+void kv_gc_pm(kv_t *kv);
+
 cJSON *kv_dump(kv_cli_t *kv_cli);
+void kv_dump_print(kv_cli_t *kv_cli);
 
 kv_rm_t *kv_rm_create(kv_rm_conf_t *conf);
 void kv_rm_destroy(kv_rm_t *kv_rm);

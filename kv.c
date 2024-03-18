@@ -260,3 +260,23 @@ cJSON *kv_dump(kv_cli_t *kv_cli) {
 
     return out;
 }
+
+void kv_dump_print(kv_cli_t *kv_cli) {
+    cJSON *out;
+    char *s;
+
+    out = kv_dump(kv_cli);
+
+    s = cJSON_Print(out);
+    printf("%s", s);
+
+    cJSON_Delete(out);
+}
+
+void kv_gc_logs(kv_t *kv) {
+    gc_logs(kv->gc);
+}
+
+void kv_gc_pm(kv_t *kv) {
+    gc_pm(kv->gc);
+}
