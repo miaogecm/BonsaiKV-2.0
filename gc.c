@@ -14,8 +14,6 @@
 #include "gc.h"
 
 struct gc_cli {
-    perf_t *perf;
-
     kc_t *kc;
 
     shim_cli_t *shim_cli;
@@ -52,7 +50,6 @@ static int ingest_log(gc_cli_t *gc_cli, op_t op, dgroup_t dgroup, k_t key, uint6
 
 static int scanner(uint64_t oplog, dgroup_t dgroup, void *priv) {
     gc_cli_t *gc_cli = priv;
-    size_t gc_size;
     uint64_t valp;
     k_t key;
     op_t op;
@@ -73,16 +70,6 @@ static int scanner(uint64_t oplog, dgroup_t dgroup, void *priv) {
     ret = ingest_log(gc_cli, op, dgroup, key, valp);
     if (unlikely(ret)) {
         pr_err("ingest_log failed with %d(%s)", ret, strerror(-ret));
-        goto out;
-    }
-
-    /* invoke GC from LPM to RPM when LPM too large */
-    if (unlikely(dset_get_pm_utilization(gc_cli->dcli) > gc_cli->pm_high_watermark)) {
-        gc_size = gc_cli->pm_gc_size;
-        ret = dset_gc(gc_cli->dcli, &gc_size);
-        if (unlikely(ret)) {
-            pr_err("dset_gc failed with %d(%s)", ret, strerror(-ret));
-        }
     }
 
 out:
@@ -94,13 +81,14 @@ static void ingest_until_barrier(gc_cli_t *gc_cli, logger_barrier_t *barrier) {
     logger_prefetch_until_barrier(barrier);
 
     /* scan the shim layer to fetch and ingest each op */
-    shim_scan(gc_cli->shim_cli, scanner, gc_cli);
+    shim_scan_logs(gc_cli->shim_cli, scanner, gc_cli);
 }
 
 static void *gc_thread(void *arg) {
     logger_barrier_t *barrier;
     gc_cli_t *gc_cli = arg;
-    size_t total;
+    size_t total, gc_size;
+    int ret;
 
     gc_cli->tid = current_tid();
 
@@ -121,6 +109,15 @@ static void *gc_thread(void *arg) {
         /* gc until current log tail */
         logger_gc_before_barrier(barrier);
         logger_destroy_barrier(barrier);
+
+        /* invoke GC from LPM to RPM when LPM too large */
+        if (unlikely(dset_get_pm_utilization(gc_cli->dcli) > gc_cli->pm_high_watermark)) {
+            gc_size = gc_cli->pm_gc_size;
+            ret = dset_gc(gc_cli->dcli, &gc_size);
+            if (unlikely(ret)) {
+                pr_err("dset_gc failed with %d(%s)", ret, strerror(-ret));
+            }
+        }
     }
 
     pr_debug(5, "gc thread exit");
@@ -128,7 +125,7 @@ static void *gc_thread(void *arg) {
     return NULL;
 }
 
-gc_cli_t *gc_cli_create(perf_t *perf, kc_t *kc,
+gc_cli_t *gc_cli_create(kc_t *kc,
                         logger_cli_t *logger_cli, shim_cli_t *shim_cli, dcli_t *dcli,
                         size_t pm_high_watermark, size_t pm_gc_size) {
     gc_cli_t *gc_cli;
@@ -140,8 +137,6 @@ gc_cli_t *gc_cli_create(perf_t *perf, kc_t *kc,
         pr_err("failed to allocate gc_cli memory");
         goto out;
     }
-
-    gc_cli->perf = perf;
 
     gc_cli->kc = kc;
 

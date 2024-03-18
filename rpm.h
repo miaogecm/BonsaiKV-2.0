@@ -73,7 +73,6 @@
 #include <stdint.h>
 
 #include "utils.h"
-#include "perf.h"
 
 /* Remote */
 
@@ -153,7 +152,7 @@ struct rpma_buf {
 rpma_t *rpma_create(const char *host, const char *dev_ip, int interval_usZ);
 void rpma_destroy(rpma_t *rpma);
 
-rpma_cli_t *rpma_cli_create(rpma_t *rpma, perf_t *perf);
+rpma_cli_t *rpma_cli_create(rpma_t *rpma);
 void rpma_cli_destroy(rpma_cli_t *cli);
 
 int rpma_add_mr(rpma_cli_t *cli, void *start, size_t size);

@@ -13,5 +13,5 @@ include_directories(${THIRD_PARTY_DIR})
 
 add_library(bonsaikv_index STATIC index_mt.cc)
 
-add_library(bonsaikv SHARED kv.c utils.c asok.c rpm.c perf.c shim.c oplog.c dset.c gc.c pm.c alloc.c)
+add_library(bonsaikv SHARED kv.c utils.c asok.c rpm.c shim.c oplog.c dset.c gc.c pm.c alloc.c)
 target_link_libraries(bonsaikv pthread jemalloc backtrace cjson ibverbs rdmacm bonsaikv_index)

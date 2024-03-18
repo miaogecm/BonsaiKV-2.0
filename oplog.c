@@ -12,6 +12,7 @@
 #include <urcu.h>
 #include <numa.h>
 
+#include "utils.h"
 #include "alloc.h"
 #include "oplog.h"
 #include "lock.h"
@@ -68,8 +69,6 @@ struct lcb {
 struct logger_cli {
     logger_t *logger;
     int id;
-
-    perf_t *perf;
 
     /*
      * @head points to the beginning of log region
@@ -194,7 +193,7 @@ static inline struct logger_shard *find_cli_shard(logger_t *logger) {
     return shard;
 }
 
-logger_cli_t *logger_cli_create(logger_t *logger, perf_t *perf, size_t log_region_size, int id) {
+logger_cli_t *logger_cli_create(logger_t *logger, size_t log_region_size, int id) {
     struct logger_shard *shard;
     logger_cli_t *cli;
     uint64_t logs_off;
@@ -208,8 +207,6 @@ logger_cli_t *logger_cli_create(logger_t *logger, perf_t *perf, size_t log_regio
 
     cli->logger = logger;
     cli->id = id;
-
-    cli->perf = perf;
 
     cli->lcb_size = logger->lcb_size;
 

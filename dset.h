@@ -16,7 +16,6 @@
 #include <unistd.h>
 #include <stdint.h>
 
-#include "perf.h"
 #include "rpm.h"
 #include "k.h"
 
@@ -41,7 +40,7 @@ dset_t *dset_create(kc_t *kc,
                     int max_gc_prefetch);
 void dset_destroy(dset_t *dset);
 
-dcli_t *dcli_create(dset_t *dset, perf_t *perf, struct shim_cli *shim_cli);
+dcli_t *dcli_create(dset_t *dset, struct shim_cli *shim_cli);
 void dcli_destroy(dcli_t *dcli);
 
 int dset_upsert(dcli_t *dcli, dgroup_t dgroup, k_t key, uint64_t valp);

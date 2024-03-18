@@ -41,7 +41,6 @@ struct kv_cli {
     shim_cli_t *shim_cli;
     logger_cli_t *logger_cli;
     dcli_t *dcli;
-    perf_t *perf;
 };
 
 struct kv_rm {
@@ -106,7 +105,7 @@ kv_t *kv_create(kv_conf_t *conf) {
         pr_err("failed to create gc_cli");
         goto out;
     }
-    kv->gc = gc_cli_create(kv->gc_cli->perf, conf->kc,
+    kv->gc = gc_cli_create(conf->kc,
                            kv->gc_cli->logger_cli, kv->gc_cli->shim_cli, kv->gc_cli->dcli,
                            conf->pm_high_watermark, conf->pm_gc_size);
     if (unlikely(IS_ERR(kv->gc))) {
@@ -144,35 +143,28 @@ kv_cli_t *kv_cli_create(kv_t *kv, kv_cli_conf_t *conf) {
 
     kv_cli->id = conf->id;
 
-    kv_cli->perf = perf_create();
-    if (unlikely(IS_ERR(kv_cli->perf))) {
-        kv_cli = ERR_CAST(kv_cli->perf);
-        pr_err("failed to create perf");
-        goto out;
-    }
-
-    kv_cli->rpma_cli = rpma_cli_create(kv->rpma, kv_cli->perf);
+    kv_cli->rpma_cli = rpma_cli_create(kv->rpma);
     if (unlikely(IS_ERR(kv_cli->rpma_cli))) {
         kv_cli = ERR_CAST(kv_cli->rpma_cli);
         pr_err("failed to create rpma_cli");
         goto out;
     }
 
-    kv_cli->shim_cli = shim_create_cli(kv->shim, kv_cli->perf, kv_cli->logger_cli);
+    kv_cli->shim_cli = shim_create_cli(kv->shim, kv_cli->logger_cli);
     if (unlikely(IS_ERR(kv_cli->shim_cli))) {
         kv_cli = ERR_CAST(kv_cli->shim_cli);
         pr_err("failed to create shim_cli");
         goto out;
     }
 
-    kv_cli->logger_cli = logger_cli_create(kv->logger, kv_cli->perf, conf->logger_region_size, conf->id);
+    kv_cli->logger_cli = logger_cli_create(kv->logger, conf->logger_region_size, conf->id);
     if (unlikely(IS_ERR(kv_cli->logger_cli))) {
         kv_cli = ERR_CAST(kv_cli->logger_cli);
         pr_err("failed to create logger_cli");
         goto out;
     }
 
-    kv_cli->dcli = dcli_create(kv->dset, kv_cli->perf, kv_cli->shim_cli);
+    kv_cli->dcli = dcli_create(kv->dset, kv_cli->shim_cli);
     if (unlikely(IS_ERR(kv_cli->dcli))) {
         kv_cli = ERR_CAST(kv_cli->dcli);
         pr_err("failed to create dcli");
@@ -190,7 +182,6 @@ void kv_cli_destroy(kv_cli_t *kv_cli) {
     logger_cli_destroy(kv_cli->logger_cli);
     shim_destroy_cli(kv_cli->shim_cli);
     rpma_cli_destroy(kv_cli->rpma_cli);
-    perf_destroy(kv_cli->perf);
     free(kv_cli);
 }
 

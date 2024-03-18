@@ -31,8 +31,6 @@ struct shim_cli {
     index_t *index;
     kc_t *kc;
 
-    perf_t *perf;
-
     logger_cli_t *logger_cli;
     dcli_t *dcli;
 };
@@ -98,11 +96,13 @@ shim_t *shim_create(index_t *index, kc_t *kc) {
         pr_err("failed to create sentinel");
     }
 
+    pr_debug(5, "shim created");
+
 out:
     return shim;
 }
 
-shim_cli_t *shim_create_cli(shim_t *shim, perf_t *perf, logger_cli_t *logger_cli) {
+shim_cli_t *shim_create_cli(shim_t *shim, logger_cli_t *logger_cli) {
     shim_cli_t *shim_cli;
 
     shim_cli = calloc(1, sizeof(*shim_cli));
@@ -118,9 +118,9 @@ shim_cli_t *shim_create_cli(shim_t *shim, perf_t *perf, logger_cli_t *logger_cli
 
     shim_cli->kc = shim->kc;
 
-    shim_cli->perf = perf;
-
     shim_cli->logger_cli = logger_cli;
+
+    pr_debug(10, "shim client created");
 
 out:
     return shim_cli;
@@ -132,6 +132,8 @@ void shim_set_dcli(shim_cli_t *shim_cli, dcli_t *dcli) {
 
 void shim_destroy_cli(shim_cli_t *shim_cli) {
     free(shim_cli);
+
+    pr_debug(10, "shim client destroyed");
 }
 
 static inline k_t i_lfence(inode_t *inode) {
@@ -268,7 +270,8 @@ static inline void i_split(shim_cli_t *shim_cli, inode_t *inode, k_t cut) {
     index_upsert(shim_cli->index, fence, new);
 }
 
-static inline int search_log(shim_cli_t *shim_cli, inode_t *inode, k_t key, uint64_t *valp, int *pos) {
+static inline int search_log(shim_cli_t *shim_cli, inode_t *inode, uint32_t validmap,
+                             k_t key, uint64_t *valp, int *pos) {
     uint8_t fgprt = k_fgprt(shim_cli->kc, key);
     int i, ret = -ERANGE;
     k_t log_key;
@@ -276,7 +279,7 @@ static inline int search_log(shim_cli_t *shim_cli, inode_t *inode, k_t key, uint
 
     *pos = INODE_FANOUT;
 
-    for (i = 0; i < INODE_FANOUT; i++) {
+    for_each_set_bit(i, &validmap, INODE_FANOUT) {
         if (inode->fgprt[i] != fgprt) {
             continue;
         }
@@ -316,7 +319,7 @@ int shim_upsert(shim_cli_t *shim_cli, k_t key, oplog_t log) {
 
     validmap = inode->validmap;
 
-    ret = search_log(shim_cli, inode, key, &valp, &pos);
+    ret = search_log(shim_cli, inode, validmap, key, &valp, &pos);
     if (unlikely(!IS_ERR(ret))) {
         /* Key exists, update */
         ret = -EEXIST;
@@ -364,6 +367,7 @@ out:
 int shim_lookup(shim_cli_t *shim_cli, k_t key, uint64_t *valp) {
     inode_t *inode, *next;
     char rfence_buf[256];
+    uint32_t validmap;
     size_t rfence_len;
     unsigned int seq;
     int pos, ret;
@@ -382,6 +386,8 @@ retry:
         goto retry;
     }
 
+    validmap = inode->validmap;
+
     rfence = (k_t) { rfence_buf, rfence_len };
 
     if (unlikely(k_cmp(shim_cli->kc, key, rfence) >= 0)) {
@@ -389,7 +395,7 @@ retry:
         goto retry;
     }
 
-    ret = search_log(shim_cli, inode, key, valp, &pos);
+    ret = search_log(shim_cli, inode, validmap, key, valp, &pos);
 
     if (unlikely(read_seqcount_retry(&inode->seq, seq))) {
         goto retry;
@@ -495,24 +501,29 @@ retry:
     return ret;
 }
 
-void shim_scan(shim_cli_t *shim_cli, shim_log_scanner scanner, void *priv) {
-    inode_t *inode, *next;
-    k_t key;
+void shim_scan_logs(shim_cli_t *shim_cli, shim_log_scanner scanner, void *priv) {
+    inode_t *inode, *ibuf;
     uint64_t valp;
+    unsigned seq;
+    k_t key;
     int pos;
 
-    for (inode = shim_cli->shim->sentinel; inode; inode = next) {
-        next = inode->next;
-        spin_lock(&inode->lock);
-        if (unlikely(inode->deleted)) {
-            spin_unlock(&inode->lock);
-            continue;
-        }
-        spin_unlock(&inode->lock);
+    ibuf = malloc(sizeof(*ibuf) + 2 * shim_cli->kc->max_len);
+    bonsai_assert(ibuf);
 
-        for_each_set_bit(pos, &inode->validmap, INODE_FANOUT) {
-            logger_get(shim_cli->logger_cli, inode->logs[pos], &key, &valp);
-            scanner(inode->logs[pos], inode->dgroup, priv);
+    for (inode = shim_cli->shim->sentinel; inode; inode = ibuf->next) {
+        /* snapshot the inode */
+        do {
+            seq = read_seqcount_begin(&inode->seq);
+            memcpy(ibuf, inode, sizeof(*ibuf) + inode->lfence_len + inode->rfence_len);
+        } while (unlikely(read_seqcount_retry(&inode->seq, seq)));
+
+        /* scan logs */
+        for_each_set_bit(pos, &ibuf->validmap, INODE_FANOUT) {
+            logger_get(shim_cli->logger_cli, ibuf->logs[pos], &key, &valp);
+            scanner(ibuf->logs[pos], ibuf->dgroup, priv);
         }
     }
+
+    free(ibuf);
 }

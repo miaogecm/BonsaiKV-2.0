@@ -76,7 +76,6 @@
 #include "atomic.h"
 #include "alloc.h"
 #include "list.h"
-#include "perf.h"
 #include "rpm.h"
 #include "pm.h"
 
@@ -230,7 +229,6 @@ struct rpma {
 
 struct rpma_cli {
     rpma_t *rpma;
-    perf_t *perf;
 
     struct ibv_pd *pd;
 
@@ -924,7 +922,7 @@ void rpma_destroy(rpma_t *rpma) {
     free(rpma);
 }
 
-rpma_cli_t *rpma_cli_create(rpma_t *rpma, perf_t *perf) {
+rpma_cli_t *rpma_cli_create(rpma_t *rpma) {
     struct rdma_conn_param conn_param = { };
     struct rdma_event_channel *cm_chan;
     struct ibv_qp_init_attr init_attr;
@@ -943,7 +941,6 @@ rpma_cli_t *rpma_cli_create(rpma_t *rpma, perf_t *perf) {
     }
 
     cli->rpma = rpma;
-    cli->perf = perf;
 
     cm_chan = rdma_create_event_channel();
     if (unlikely(!cm_chan)) {

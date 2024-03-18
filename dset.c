@@ -91,7 +91,6 @@ struct dcli {
     struct pm_dev *bdev;
     rpma_cli_t *rpma_cli;
 
-    perf_t *perf;
     kc_t *kc;
 
     size_t bnode_size, bmnode_size;
@@ -323,7 +322,7 @@ out:
     return ret;
 }
 
-dcli_t *dcli_create(dset_t *dset, perf_t *perf, shim_cli_t *shim_cli) {
+dcli_t *dcli_create(dset_t *dset, shim_cli_t *shim_cli) {
     size_t dstripe_size = UINT64_MAX;
     dcli_t *dcli;
     int ret, i;
@@ -336,10 +335,8 @@ dcli_t *dcli_create(dset_t *dset, perf_t *perf, shim_cli_t *shim_cli) {
 
     dcli->dset = dset;
 
-    dcli->perf = perf;
-
     dcli->bdev = dset->bdev;
-    dcli->rpma_cli = rpma_cli_create(dset->rpma, perf);
+    dcli->rpma_cli = rpma_cli_create(dset->rpma);
     if (unlikely(IS_ERR(dcli->rpma_cli))) {
         dcli = ERR_PTR(PTR_ERR(dcli->rpma_cli));
         pr_err("failed to create rpma client: %s", strerror(-PTR_ERR(dcli->rpma_cli)));
