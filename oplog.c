@@ -368,6 +368,11 @@ static inline void logger_cpy(logger_cli_t *cli, void *dst, size_t head, size_t 
     memcpy(dst + lcb->start - head, lcb->data, tail - lcb->start);
 }
 
+bool logger_is_stale(logger_cli_t *logger_cli, oplog_t log) {
+    struct oplog_ptr o = { .raw = log };
+    return logger_cli->logger->clis[o.cli_id]->head > o.off;
+}
+
 logger_barrier_t *logger_snap_barrier(logger_cli_t *logger_cli, size_t *total) {
     struct logger_cli_barrier *cb;
     logger_barrier_t *lb;

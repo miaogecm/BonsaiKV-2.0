@@ -34,4 +34,6 @@ void shim_scan_logs(shim_cli_t *shim_cli, shim_log_scanner scanner, void *priv);
 int shim_update_dgroup(shim_cli_t *shim_cli, k_t s, k_t t, dgroup_t dgroup);
 int shim_lookup_dgroup(shim_cli_t *shim_cli, k_t key, dgroup_t *dgroup);
 
+void shim_gc(shim_cli_t *shim_cli);
+
 #endif //SHIM_H

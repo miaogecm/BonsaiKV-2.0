@@ -8,6 +8,8 @@
 
 #define _GNU_SOURCE
 
+#include <urcu.h>
+
 #include "oplog.h"
 #include "shim.h"
 #include "dset.h"
@@ -101,6 +103,9 @@ static void *gc_thread(void *arg) {
             continue;
         }
 
+        /* make sure all logs are visible in the shim layer */
+        synchronize_rcu();
+
         pr_debug(20, "gc logs start (size=%lu)", total);
 
         /* ingest logs before barrier */
@@ -109,6 +114,9 @@ static void *gc_thread(void *arg) {
         /* gc until current log tail */
         logger_gc_before_barrier(barrier);
         logger_destroy_barrier(barrier);
+
+        /* GC shim layer */
+        shim_gc(gc_cli->shim_cli);
 
         /* invoke GC from LPM to RPM when LPM too large */
         if (unlikely(dset_get_pm_utilization(gc_cli->dcli) > gc_cli->pm_high_watermark)) {

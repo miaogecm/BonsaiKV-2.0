@@ -527,3 +527,77 @@ void shim_scan_logs(shim_cli_t *shim_cli, shim_log_scanner scanner, void *priv) 
 
     free(ibuf);
 }
+
+static void inode_gc(shim_cli_t *shim_cli, inode_t *inode) {
+    int pos;
+
+    /* clear stale logs */
+    for_each_set_bit(pos, &inode->validmap, INODE_FANOUT) {
+        if (logger_is_stale(shim_cli->logger_cli, inode->logs[pos])) {
+            __clear_bit(pos, &inode->validmap);
+        }
+    }
+}
+
+/* merge inode into prev */
+static void inode_merge(shim_cli_t *shim_cli, inode_t *prev, inode_t *inode) {
+    uint64_t inode_bmp, prev_bmp;
+    int pos, i;
+
+    inode_bmp = inode->validmap;
+    prev_bmp = prev->validmap;
+
+    /* copy data to prev */
+    for_each_set_bit(pos, &inode_bmp, INODE_FANOUT) {
+        i = find_first_zero_bit(&prev_bmp, INODE_FANOUT);
+        bonsai_assert(i < INODE_FANOUT);
+        __set_bit(i, &prev_bmp);
+        prev->logs[i] = inode->logs[pos];
+        prev->fgprt[i] = inode->fgprt[pos];
+    }
+
+    /* update prev atomically */
+    write_seqcount_begin(&prev->seq);
+    prev->validmap = prev_bmp;
+    prev->next = inode->next;
+    prev->rfence_len = inode->rfence_len;
+    memcpy(i_rfence(prev).key, i_rfence(inode).key, inode->rfence_len);
+    write_seqcount_end(&prev->seq);
+
+    /* remove inode from index */
+    index_remove(shim_cli->index, i_lfence(inode));
+
+    /* delay free inode */
+    /* TODO: finish me */
+}
+
+void shim_gc(shim_cli_t *shim_cli) {
+    inode_t *inode, *prev = NULL;
+
+    inode = shim_cli->shim->sentinel;
+
+    while (inode) {
+        spin_lock(&inode->lock);
+
+        /* gc current inode */
+        inode_gc(shim_cli, inode);
+
+        /* if can be merged with prev inode */
+        if (prev &&
+            hweight64(prev->validmap) + hweight64(inode->validmap) <= INODE_FANOUT &&
+            dgroup_is_eq(prev->dgroup, inode->dgroup)) {
+            inode_merge(shim_cli, prev, inode);
+        }
+
+        /* unlock prev inode, go to next node */
+        if (prev) {
+            spin_unlock(&prev->lock);
+        }
+        prev = inode;
+        inode = inode->next;
+    }
+
+    if (prev) {
+        spin_unlock(&prev->lock);
+    }
+}
