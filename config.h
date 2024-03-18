@@ -11,8 +11,11 @@
 
 #include "k.h"
 
+struct rpma_conf;
+
 typedef struct kv_conf kv_conf_t;
 typedef struct kv_cli_conf kv_cli_conf_t;
+typedef struct kv_rm_conf kv_rm_conf_t;
 
 struct kv_conf {
     /* key class */
@@ -48,7 +51,7 @@ struct kv_cli_conf {
 };
 
 struct kv_rm_conf {
-
+    struct rpma_conf *rpma_conf;
 };
 
 #endif //CONFIG_H

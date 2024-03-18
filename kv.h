@@ -13,6 +13,7 @@
 
 typedef struct kv kv_t;
 typedef struct kv_cli kv_cli_t;
+typedef struct kv_rm kv_rm_t;
 
 kv_t *kv_create(kv_conf_t *conf);
 void kv_destroy(kv_t *kv);
@@ -23,5 +24,8 @@ void kv_cli_destroy(kv_cli_t *kv_cli);
 int kv_put(kv_cli_t *kv_cli, k_t key, uint64_t valp);
 int kv_get(kv_cli_t *kv_cli, k_t key, uint64_t *valp);
 int kv_del(kv_cli_t *kv_cli, k_t key);
+
+kv_rm_t *kv_rm_create(kv_rm_conf_t *conf);
+void kv_rm_destroy(kv_rm_t *kv_rm);
 
 #endif //KV_H

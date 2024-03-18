@@ -44,6 +44,10 @@ struct kv_cli {
     perf_t *perf;
 };
 
+struct kv_rm {
+    rpma_svr_t *svr;
+};
+
 kv_t *kv_create(kv_conf_t *conf) {
     kv_cli_conf_t gc_cli_conf;
     kv_t *kv;
@@ -77,7 +81,7 @@ kv_t *kv_create(kv_conf_t *conf) {
     }
 
     kv->logger = logger_create(conf->kc, conf->logger_nr_shards, conf->logger_shard_devs, conf->logger_lcb_size);
-    if (unlikely(IS_ERR(kv->logger)) {
+    if (unlikely(IS_ERR(kv->logger))) {
         kv = ERR_CAST(kv->logger);
         pr_err("failed to create logger");
         goto out;
@@ -222,4 +226,30 @@ int kv_del(kv_cli_t *kv_cli, k_t key) {
 
 out:
     return ret;
+}
+
+kv_rm_t *kv_rm_create(kv_rm_conf_t *conf) {
+    kv_rm_t *kv_rm;
+
+    kv_rm = calloc(1, sizeof(*kv_rm));
+    if (unlikely(!kv_rm)) {
+        kv_rm = ERR_PTR(-ENOMEM);
+        pr_err("failed to allocate kv_rm");
+        goto out;
+    }
+
+    kv_rm->svr = rpma_svr_create(conf->rpma_conf);
+    if (unlikely(IS_ERR(kv_rm->svr))) {
+        kv_rm = ERR_CAST(kv_rm->svr);
+        pr_err("failed to create rpma_svr");
+        goto out;
+    }
+
+out:
+    return kv_rm;
+}
+
+void kv_rm_destroy(kv_rm_t *kv_rm) {
+    rpma_svr_destroy(kv_rm->svr);
+    free(kv_rm);
 }
