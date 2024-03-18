@@ -225,6 +225,8 @@ struct rpma {
 
     allocator_t *allocator;
     bool allocator_created;
+
+    struct dom_dir **dirs;
 };
 
 struct rpma_cli {
@@ -914,6 +916,8 @@ rpma_t *rpma_create(const char *host, const char *dev_ip, int interval_us) {
     rpma->dev_ip = dev_ip;
     register_epoch_timer(interval_us);
 
+    /* TODO: init dirs */
+
 out:
     return rpma;
 }
@@ -1075,8 +1079,8 @@ rpma_cli_t *rpma_cli_create(rpma_t *rpma) {
         pr_err("failed to allocate memory for doms: %s", strerror(errno));
         goto out_destroy_id;
     }
-    /* TODO: init dir */
     for (i = 0; i < cli->nr_doms; i++) {
+        cli->doms[i].dir = rpma->dirs[i];
         cli->doms[i].id = i;
         cli->doms[i].mr_key = pdata->dommr_keys[i];
     }
@@ -1197,7 +1201,7 @@ static inline void *push_operand(rpma_cli_t *cli, void *start, size_t len) {
     return p;
 }
 
-static inline void *get_operand(rpma_cli_t *cli, uint32_t *lkey, void *start, size_t len) {
+static inline void *get_operand(rpma_cli_t *cli, uint32_t *lkey, void *start, size_t len, bool read) {
     struct ibv_mr *mr;
     void *operand;
 
@@ -1207,7 +1211,12 @@ static inline void *get_operand(rpma_cli_t *cli, uint32_t *lkey, void *start, si
         goto out;
     }
 
-    /* TODO: copy for read ops */
+    if (unlikely(read)) {
+        pr_err("operand buffer not registered: %p", start);
+        operand = ERR_PTR(-EINVAL);
+        goto out_err;
+    }
+
     operand = push_operand(cli, start, len);
     if (unlikely(IS_ERR(operand))) {
         goto out_err;
@@ -1221,7 +1230,7 @@ out_err:
     return operand;
 }
 
-static inline struct ibv_sge *get_sg_list(rpma_cli_t *cli, rpma_buf_t *buf, int *nr) {
+static inline struct ibv_sge *get_sg_list(rpma_cli_t *cli, rpma_buf_t *buf, int *nr, bool read) {
     struct ibv_sge *sglist;
     int i, cnt = 0;
     void *addr;
@@ -1239,7 +1248,7 @@ static inline struct ibv_sge *get_sg_list(rpma_cli_t *cli, rpma_buf_t *buf, int 
     }
 
     for (i = 0; i < cnt; i++) {
-        addr = get_operand(cli, &sglist[i].lkey, buf[i].start, buf[i].size);
+        addr = get_operand(cli, &sglist[i].lkey, buf[i].start, buf[i].size, read);
         sglist[i].addr = (uintptr_t) addr;
         sglist[i].length = buf[i].size;
         if (unlikely(IS_ERR(addr))) {
@@ -1275,7 +1284,7 @@ int rpma_wr_(rpma_cli_t *cli, rpma_ptr_t dst, rpma_buf_t src[], rpma_flag_t flag
         goto out;
     }
 
-    sgl = get_sg_list(cli, src, &num_sge);
+    sgl = get_sg_list(cli, src, &num_sge, false);
     if (unlikely(IS_ERR(sgl))) {
         ret = PTR_ERR(sgl);
         pr_err("failed to get sg list: %s", strerror(-ret));
@@ -1322,7 +1331,7 @@ static inline int replicate(rpma_cli_t *cli, void *replica, rpma_ptr_t src) {
 
     target_off = src.off * cli->nr_doms;
 
-    sgl = get_sg_list(cli, rpma_buflist(cli, data, cli->segment_size * cli->nr_doms), &num_sge);
+    sgl = get_sg_list(cli, rpma_buflist(cli, data, cli->segment_size * cli->nr_doms), &num_sge, false);
     if (unlikely(IS_ERR(sgl))) {
         ret = PTR_ERR(sgl);
         pr_err("failed to get sg list: %s", strerror(-ret));
@@ -1402,7 +1411,7 @@ int rpma_rd_(rpma_cli_t *cli, rpma_buf_t dst[], rpma_ptr_t src, rpma_flag_t flag
         goto out;
     }
 
-    sgl = get_sg_list(cli, dst, &num_sge);
+    sgl = get_sg_list(cli, dst, &num_sge, true);
     if (unlikely(IS_ERR(sgl))) {
         ret = PTR_ERR(sgl);
         pr_err("failed to get sg list: %s", strerror(-ret));

@@ -411,6 +411,27 @@ retry:
     return ret;
 }
 
+int shim_scan(shim_cli_t *shim_cli, k_t key, int len) {
+    dgroup_t last_dgroup;
+    bool first = true;
+    inode_t *inode;
+    int nr = 0;
+
+    for (inode = iget_unlocked(shim_cli, key); inode; inode = inode->next) {
+        if (!first && dgroup_is_eq(last_dgroup, inode->dgroup)) {
+            continue;
+        }
+
+        nr += dset_scan(shim_cli->dcli, inode->dgroup);
+        if (unlikely(nr >= len)) {
+            break;
+        }
+
+        last_dgroup = inode->dgroup;
+        first = false;
+    }
+}
+
 int shim_update_dgroup(shim_cli_t *shim_cli, k_t s, k_t t, dgroup_t dgroup) {
     k_t lfence, rfence, is, it;
     inode_t *inode, *next;

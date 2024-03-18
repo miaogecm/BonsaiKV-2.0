@@ -395,6 +395,42 @@ void dcli_destroy(dcli_t *dcli) {
     free(dcli);
 }
 
+/* get mnode and enode */
+static inline struct mnode *dnode_get_mnode_enode(dcli_t *dcli, rpma_ptr_t dnode) {
+    struct mnode *mnode;
+    size_t size;
+    int ret;
+
+    size = dcli->dnode_size;
+
+    mnode = rpma_buf_alloc(dcli->rpma_cli, size);
+    if (unlikely(IS_ERR(mnode))) {
+        pr_err("failed to allocate memory for mnode: %s", strerror(-PTR_ERR(mnode)));
+        goto out;
+    }
+
+    ret = rpma_rd(dcli->rpma_cli, dnode, 0, mnode, size);
+    if (unlikely(ret < 0)) {
+        pr_err("failed to read mnode: %s", strerror(-ret));
+        rpma_buf_free(dcli->rpma_cli, mnode, size);
+        mnode = ERR_PTR(ret);
+    }
+
+    ret = rpma_commit_sync(dcli->rpma_cli);
+    if (unlikely(ret < 0)) {
+        pr_err("failed to commit mnode read: %s", strerror(-ret));
+        rpma_buf_free(dcli->rpma_cli, mnode, dcli->dstrip_size);
+        mnode = ERR_PTR(ret);
+    }
+
+out:
+    return mnode;
+}
+
+static inline void dnode_put_mnode_enode(dcli_t *dcli, struct mnode *mnode) {
+    rpma_buf_free(dcli->rpma_cli, mnode, dcli->dnode_size);
+}
+
 static inline struct mnode *dnode_get_mnode(dcli_t *dcli, rpma_ptr_t dnode) {
     struct mnode *mnode;
     size_t msize;
@@ -437,7 +473,7 @@ static inline int dnode_get_enode_fnode(dcli_t *dcli, rpma_ptr_t dnode, struct m
     size_t size;
     int ret;
 
-    size = mnode->nr_ents * sizeof_entry(dcli) + sizeof(struct fnode) + mnode->lfence_len + mnode->rfence_len;
+    size = dcli->dnode_size - dcli->dstrip_size + sizeof(struct fnode) + mnode->lfence_len + mnode->rfence_len;
 
     enode = rpma_buf_alloc(dcli->rpma_cli, size);
     if (unlikely(IS_ERR(enode))) {
@@ -467,9 +503,9 @@ out:
     return ret;
 }
 
-static inline void dnode_put_enode_fnode(dcli_t *dcli, struct mnode *mnode, struct enode *enode, struct fnode *fnode) {
-    size_t esize = mnode->nr_ents * sizeof_entry(dcli);
-    rpma_buf_free(dcli->rpma_cli, enode, esize);
+static inline void dnode_put_enode_fnode(dcli_t *dcli, struct mnode *mnode, struct enode *enode) {
+    size_t size = dcli->dnode_size - dcli->dstrip_size + sizeof(struct fnode) + mnode->lfence_len + mnode->rfence_len;
+    rpma_buf_free(dcli->rpma_cli, enode, size);
 }
 
 static int bnode_delete(dcli_t *dcli, size_t bnode, k_t key) {
@@ -1344,7 +1380,7 @@ static cJSON *dnode_dump(dcli_t *dcli, rpma_ptr_t dnode) {
 
     cJSON_AddItemToObject(out, "entries", entries);
 
-    dnode_put_enode_fnode(dcli, mnode, enode, fnode);
+    dnode_put_enode_fnode(dcli, mnode, enode);
     dnode_put_mnode(dcli, mnode);
 
     return out;
@@ -1394,4 +1430,16 @@ cJSON *dset_dump(dcli_t *dcli) {
     cJSON_AddItemToObject(out, "dnodes", dnodes_dump(dcli));
 
     return out;
+}
+
+int dset_scan(dcli_t *dcli, dgroup_t dgroup) {
+    rpma_ptr_t dnode = dgroup.dnode;
+    struct mnode *mnode;
+    int nr;
+
+    mnode = dnode_get_mnode_enode(dcli, dnode);
+    nr = mnode->nr_ents;
+    dnode_put_mnode(dcli, mnode);
+
+    return nr;
 }

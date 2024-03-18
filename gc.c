@@ -26,7 +26,11 @@ struct gc_cli {
     pthread_t gc_thread;
     pid_t tid;
 
+    bool auto_gc_logs, auto_gc_pm;
+    size_t min_gc_size;
     size_t pm_high_watermark, pm_gc_size;
+
+    bool gc_logs_invoked, gc_pm_invoked;
 };
 
 static int ingest_log(gc_cli_t *gc_cli, op_t op, dgroup_t dgroup, k_t key, uint64_t valp) {
@@ -99,8 +103,16 @@ static void *gc_thread(void *arg) {
     while (!READ_ONCE(gc_cli->exit)) {
         /* snapshot current log tail */
         barrier = logger_snap_barrier(gc_cli->logger_cli, &total);
-        if (unlikely(total == 0)) {
+        if (unlikely(!total)) {
             continue;
+        }
+        if (likely(!gc_cli->gc_logs_invoked)) {
+            if (gc_cli->auto_gc_logs && total < gc_cli->min_gc_size) {
+                continue;
+            }
+        } else {
+            /* triggered manually */
+            gc_cli->gc_logs_invoked = false;
         }
 
         /* make sure all logs are visible in the shim layer */
@@ -118,13 +130,20 @@ static void *gc_thread(void *arg) {
         /* GC shim layer */
         shim_gc(gc_cli->shim_cli);
 
-        /* invoke GC from LPM to RPM when LPM too large */
-        if (unlikely(dset_get_pm_utilization(gc_cli->dcli) > gc_cli->pm_high_watermark)) {
+        /* invoke GC from LPM to RPM when LPM too large or manually invoked */
+        if (unlikely(gc_cli->gc_pm_invoked ||
+                    (gc_cli->auto_gc_pm && dset_get_pm_utilization(gc_cli->dcli) > gc_cli->pm_high_watermark))) {
+            if (unlikely(gc_cli->gc_pm_invoked)) {
+                /* triggered manually */
+                gc_cli->gc_pm_invoked = false;
+            }
             gc_size = gc_cli->pm_gc_size;
             ret = dset_gc(gc_cli->dcli, &gc_size);
             if (unlikely(ret)) {
                 pr_err("dset_gc failed with %d(%s)", ret, strerror(-ret));
             }
+
+            pr_debug(20, "gc done, size=%lu", gc_size);
         }
     }
 
@@ -135,7 +154,8 @@ static void *gc_thread(void *arg) {
 
 gc_cli_t *gc_cli_create(kc_t *kc,
                         logger_cli_t *logger_cli, shim_cli_t *shim_cli, dcli_t *dcli,
-                        size_t pm_high_watermark, size_t pm_gc_size) {
+                        bool auto_gc_logs, bool auto_gc_pm,
+                        size_t min_gc_size, size_t pm_high_watermark, size_t pm_gc_size) {
     gc_cli_t *gc_cli;
     int ret;
 
@@ -152,6 +172,9 @@ gc_cli_t *gc_cli_create(kc_t *kc,
     gc_cli->shim_cli = shim_cli;
     gc_cli->dcli = dcli;
 
+    gc_cli->auto_gc_logs = auto_gc_logs;
+    gc_cli->auto_gc_pm = auto_gc_pm;
+    gc_cli->min_gc_size = min_gc_size;
     gc_cli->pm_high_watermark = pm_high_watermark;
     gc_cli->pm_gc_size = pm_gc_size;
 
@@ -181,4 +204,12 @@ void gc_cli_destroy(gc_cli_t *gc_cli) {
     pthread_join(gc_cli->gc_thread, NULL);
 
     free(gc_cli);
+}
+
+void gc_logs(gc_cli_t *gc_cli) {
+    gc_cli->gc_logs_invoked = true;
+}
+
+void gc_pm(gc_cli_t *gc_cli) {
+    gc_cli->gc_pm_invoked = true;
 }

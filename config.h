@@ -38,6 +38,9 @@ struct kv_conf {
     int dset_max_gc_prefetch;
 
     /* gc config */
+    bool auto_gc_logs;
+    bool auto_gc_pm;
+    size_t min_gc_size;
     size_t pm_high_watermark;
     size_t pm_gc_size;
 };

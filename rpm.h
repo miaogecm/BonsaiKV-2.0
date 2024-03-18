@@ -149,7 +149,7 @@ struct rpma_buf {
     size_t size;
 };
 
-rpma_t *rpma_create(const char *host, const char *dev_ip, int interval_usZ);
+rpma_t *rpma_create(const char *host, const char *dev_ip, int interval_us);
 void rpma_destroy(rpma_t *rpma);
 
 rpma_cli_t *rpma_cli_create(rpma_t *rpma);

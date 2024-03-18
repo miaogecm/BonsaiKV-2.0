@@ -107,7 +107,8 @@ kv_t *kv_create(kv_conf_t *conf) {
     }
     kv->gc = gc_cli_create(conf->kc,
                            kv->gc_cli->logger_cli, kv->gc_cli->shim_cli, kv->gc_cli->dcli,
-                           conf->pm_high_watermark, conf->pm_gc_size);
+                           conf->auto_gc_logs, conf->auto_gc_pm,
+                           conf->min_gc_size, conf->pm_high_watermark, conf->pm_gc_size);
     if (unlikely(IS_ERR(kv->gc))) {
         kv = ERR_CAST(kv->gc);
         pr_err("failed to create gc");
@@ -217,6 +218,10 @@ int kv_del(kv_cli_t *kv_cli, k_t key) {
 
 out:
     return ret;
+}
+
+int kv_scan(kv_cli_t *kv_cli, k_t key, int len) {
+    return shim_scan(kv_cli->shim_cli, key, len);
 }
 
 kv_rm_t *kv_rm_create(kv_rm_conf_t *conf) {

@@ -47,6 +47,7 @@ void dcli_destroy(dcli_t *dcli);
 int dset_upsert(dcli_t *dcli, dgroup_t dgroup, k_t key, uint64_t valp);
 int dset_delete(dcli_t *dcli, dgroup_t dgroup, k_t key);
 int dset_lookup(dcli_t *dcli, dgroup_t dgroup, k_t key, uint64_t *valp);
+int dset_scan(dcli_t *dcli, dgroup_t dgroup);
 
 size_t dset_get_pm_utilization(dcli_t *dcli);
 

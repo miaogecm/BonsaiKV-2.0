@@ -15,7 +15,11 @@ typedef struct gc_cli gc_cli_t;
 
 gc_cli_t *gc_cli_create(kc_t *kc,
                         logger_cli_t *logger_cli, shim_cli_t *shim_cli, dcli_t *dcli,
-                        size_t pm_high_watermark, size_t pm_gc_size);
+                        bool auto_gc_logs, bool auto_gc_pm,
+                        size_t min_gc_size, size_t pm_high_watermark, size_t pm_gc_size);
 void gc_cli_destroy(gc_cli_t *gc_cli);
+
+void gc_logs(gc_cli_t *gc_cli);
+void gc_pm(gc_cli_t *gc_cli);
 
 #endif //GC_H
