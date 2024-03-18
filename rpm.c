@@ -705,6 +705,29 @@ out:
     return ret;
 }
 
+static void dump_topology(rpma_svr_t *svr) {
+    struct svr_dom *dom;
+    struct pm_dev *dev;
+    int i, j;
+
+    for (i = 0; i < svr->nr_doms; i++) {
+        dom = &svr->doms[i];
+
+        pr_debug(5, "domain %d", dom->id);
+        pr_debug(5, "\tcm_host: %s:%d", inet_ntoa((struct in_addr) { dom->ip }), dom->port);
+        pr_debug(5, "\tdevices:");
+
+        for (j = 0; j < svr->nr_devs_per_dom; j++) {
+            dev = &dom->devs[j];
+
+            pr_debug(5, "\t\tdevice %s", dev->path);
+            pr_debug(5, "\t\t\tstart: %p", dev->start);
+            pr_debug(5, "\t\t\tsize: %lu", dev->size);
+            pr_debug(5, "\t\t\tsocket: %d", dev->socket);
+        }
+    }
+}
+
 rpma_svr_t *rpma_svr_create(rpma_conf_t *rpma_conf) {
     rpma_dom_conf_t *dom_conf;
     struct svr_dom *dom;
@@ -810,7 +833,7 @@ rpma_svr_t *rpma_svr_create(rpma_conf_t *rpma_conf) {
         }
     }
 
-    /* TODO: output topology */
+    dump_topology(svr);
 
 out:
     return svr;
