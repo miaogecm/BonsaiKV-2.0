@@ -9,6 +9,7 @@
 #ifndef SHIM_H
 #define SHIM_H
 
+#include <cjson/cJSON.h>
 #include "oplog.h"
 #include "index.h"
 #include "dset.h"
@@ -35,5 +36,7 @@ int shim_update_dgroup(shim_cli_t *shim_cli, k_t s, k_t t, dgroup_t dgroup);
 int shim_lookup_dgroup(shim_cli_t *shim_cli, k_t key, dgroup_t *dgroup);
 
 void shim_gc(shim_cli_t *shim_cli);
+
+cJSON *shim_dump(shim_cli_t *shim_cli);
 
 #endif //SHIM_H

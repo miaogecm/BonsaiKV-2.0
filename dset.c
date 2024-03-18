@@ -467,7 +467,7 @@ out:
     return ret;
 }
 
-static inline void dnode_put_enode(dcli_t *dcli, struct mnode *mnode, struct enode *enode) {
+static inline void dnode_put_enode_fnode(dcli_t *dcli, struct mnode *mnode, struct enode *enode, struct fnode *fnode) {
     size_t esize = mnode->nr_ents * sizeof_entry(dcli);
     rpma_buf_free(dcli->rpma_cli, enode, esize);
 }
@@ -1280,4 +1280,118 @@ int dset_gc(dcli_t *dcli, size_t *gc_size) {
 
 out:
     return ret;
+}
+
+static cJSON *bnode_dump(dcli_t *dcli, size_t bnode) {
+    cJSON *out, *entries, *entry;
+    struct mnode *mnode;
+    struct enode *enode;
+    struct fnode *fnode;
+    int i;
+
+    mnode = boff2ptr(dcli, bnode);
+    enode = get_benode(dcli, mnode);
+    fnode = get_bfnode(dcli, mnode);
+
+    out = cJSON_CreateObject();
+
+    cJSON_AddNumberToObject(out, "addr", bnode);
+    cJSON_AddStringToObject(out, "lfence", k_str(dcli->kc, get_lfence(dcli, mnode, fnode)));
+    cJSON_AddStringToObject(out, "rfence", k_str(dcli->kc, get_rfence(dcli, mnode, fnode)));
+
+    entries = cJSON_CreateArray();
+
+    for (i = 0; i < mnode->nr_ents; i++) {
+        entry = cJSON_CreateObject();
+
+        cJSON_AddStringToObject(entry, "key", get_entry(dcli, enode, i)->key);
+        cJSON_AddNumberToObject(entry, "valp", get_entry(dcli, enode, i)->valp);
+
+        cJSON_AddItemToArray(entries, entry);
+    }
+
+    cJSON_AddItemToObject(out, "entries", entries);
+
+    return out;
+}
+
+static cJSON *dnode_dump(dcli_t *dcli, rpma_ptr_t dnode) {
+    cJSON *out, *entries, *entry;
+    struct mnode *mnode;
+    struct enode *enode;
+    struct fnode *fnode;
+    int i;
+
+    mnode = dnode_get_mnode(dcli, dnode);
+    dnode_get_enode_fnode(dcli, dnode, mnode, &enode, &fnode);
+
+    out = cJSON_CreateObject();
+
+    cJSON_AddNumberToObject(out, "addr", dnode.rawp);
+    cJSON_AddStringToObject(out, "lfence", k_str(dcli->kc, get_lfence(dcli, mnode, fnode)));
+    cJSON_AddStringToObject(out, "rfence", k_str(dcli->kc, get_rfence(dcli, mnode, fnode)));
+
+    entries = cJSON_CreateArray();
+
+    for (i = 0; i < mnode->nr_ents; i++) {
+        entry = cJSON_CreateObject();
+
+        cJSON_AddStringToObject(entry, "key", get_entry(dcli, enode, i)->key);
+        cJSON_AddNumberToObject(entry, "valp", get_entry(dcli, enode, i)->valp);
+
+        cJSON_AddItemToArray(entries, entry);
+    }
+
+    cJSON_AddItemToObject(out, "entries", entries);
+
+    dnode_put_enode_fnode(dcli, mnode, enode, fnode);
+    dnode_put_mnode(dcli, mnode);
+
+    return out;
+}
+
+static cJSON *bnodes_dump(dcli_t *dcli) {
+    struct mnode *mnode;
+    cJSON *bnodes;
+    size_t bnode;
+
+    bnodes = cJSON_CreateArray();
+
+    bnode = dcli->dset->sentinel_bnode;
+    while (bnode != BNULL) {
+        cJSON_AddItemToArray(bnodes, bnode_dump(dcli, bnode));
+        mnode = boff2ptr(dcli, bnode);
+        bnode = mnode->bnext;
+    }
+
+    return bnodes;
+}
+
+static cJSON *dnodes_dump(dcli_t *dcli) {
+    struct mnode *mnode;
+    rpma_ptr_t dnode;
+    cJSON *dnodes;
+
+    dnodes = cJSON_CreateArray();
+
+    dnode = dcli->dset->sentinel_dnode;
+    while (dnode.rawp != RPMA_NULL.rawp) {
+        cJSON_AddItemToArray(dnodes, dnode_dump(dcli, dnode));
+        mnode = dnode_get_mnode(dcli, dnode);
+        dnode = mnode->dnext;
+        dnode_put_mnode(dcli, mnode);
+    }
+
+    return dnodes;
+}
+
+cJSON *dset_dump(dcli_t *dcli) {
+    cJSON *out;
+
+    out = cJSON_CreateObject();
+
+    cJSON_AddItemToObject(out, "bnodes", bnodes_dump(dcli));
+    cJSON_AddItemToObject(out, "dnodes", dnodes_dump(dcli));
+
+    return out;
 }

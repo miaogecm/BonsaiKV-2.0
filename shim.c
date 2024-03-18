@@ -8,6 +8,8 @@
 
 #define _GNU_SOURCE
 
+#include <cjson/cJSON.h>
+
 #include "shim.h"
 #include "lock.h"
 #include "bitmap.h"
@@ -502,30 +504,30 @@ retry:
 }
 
 void shim_scan_logs(shim_cli_t *shim_cli, shim_log_scanner scanner, void *priv) {
-    inode_t *inode, *ibuf;
+    inode_t *inode, *isnap;
     uint64_t valp;
     unsigned seq;
     k_t key;
     int pos;
 
-    ibuf = malloc(sizeof(*ibuf) + 2 * shim_cli->kc->max_len);
-    bonsai_assert(ibuf);
+    isnap = malloc(sizeof(*isnap) + 2 * shim_cli->kc->max_len);
+    bonsai_assert(isnap);
 
-    for (inode = shim_cli->shim->sentinel; inode; inode = ibuf->next) {
+    for (inode = shim_cli->shim->sentinel; inode; inode = isnap->next) {
         /* snapshot the inode */
         do {
             seq = read_seqcount_begin(&inode->seq);
-            memcpy(ibuf, inode, sizeof(*ibuf) + inode->lfence_len + inode->rfence_len);
+            memcpy(isnap, inode, sizeof(*isnap) + inode->lfence_len + inode->rfence_len);
         } while (unlikely(read_seqcount_retry(&inode->seq, seq)));
 
         /* scan logs */
-        for_each_set_bit(pos, &ibuf->validmap, INODE_FANOUT) {
-            logger_get(shim_cli->logger_cli, ibuf->logs[pos], &key, &valp);
-            scanner(ibuf->logs[pos], ibuf->dgroup, priv);
+        for_each_set_bit(pos, &isnap->validmap, INODE_FANOUT) {
+            logger_get(shim_cli->logger_cli, isnap->logs[pos], &key, &valp);
+            scanner(isnap->logs[pos], isnap->dgroup, priv);
         }
     }
 
-    free(ibuf);
+    free(isnap);
 }
 
 static void inode_gc(shim_cli_t *shim_cli, inode_t *inode) {
@@ -565,6 +567,7 @@ static void inode_merge(shim_cli_t *shim_cli, inode_t *prev, inode_t *inode) {
     write_seqcount_end(&prev->seq);
 
     /* remove inode from index */
+    inode->deleted = 1;
     index_remove(shim_cli->index, i_lfence(inode));
 
     /* delay free inode */
@@ -600,4 +603,57 @@ void shim_gc(shim_cli_t *shim_cli) {
     if (prev) {
         spin_unlock(&prev->lock);
     }
+}
+
+static cJSON *inode_dump(shim_cli_t *shim_cli, inode_t *inode) {
+    cJSON *out, *entries, *entry;
+    int pos;
+
+    out = cJSON_CreateObject();
+    entries = cJSON_CreateArray();
+
+    cJSON_AddItemToObject(out, "addr", cJSON_CreateNumber((uint64_t) inode));
+    cJSON_AddItemToObject(out, "bnode", cJSON_CreateNumber(inode->dgroup.nodes[0]));
+    cJSON_AddItemToObject(out, "dnode", cJSON_CreateNumber(inode->dgroup.nodes[1]));
+    cJSON_AddItemToObject(out, "lfence", cJSON_CreateString(k_str(shim_cli->kc, i_lfence(inode))));
+    cJSON_AddItemToObject(out, "rfence", cJSON_CreateString(k_str(shim_cli->kc, i_rfence(inode))));
+    cJSON_AddItemToObject(out, "data", entries);
+
+    for_each_set_bit(pos, &inode->validmap, INODE_FANOUT) {
+        entry = cJSON_CreateObject();
+
+        cJSON_AddItemToObject(entry, "logp", cJSON_CreateNumber(inode->logs[pos]));
+        cJSON_AddItemToObject(entry, "log", logger_dump_log(shim_cli->logger_cli, inode->logs[pos]));
+
+        cJSON_AddItemToArray(entries, entry);
+    }
+
+    return out;
+}
+
+cJSON *shim_dump(shim_cli_t *shim_cli) {
+    cJSON *out, *inode_out;
+    inode_t *inode, *isnap;
+    unsigned seq;
+
+    out = cJSON_CreateArray();
+
+    isnap = malloc(sizeof(*isnap) + 2 * shim_cli->kc->max_len);
+    bonsai_assert(isnap);
+
+    for (inode = shim_cli->shim->sentinel; inode; inode = isnap->next) {
+        /* snapshot the inode */
+        do {
+            seq = read_seqcount_begin(&inode->seq);
+            memcpy(isnap, inode, sizeof(*isnap) + inode->lfence_len + inode->rfence_len);
+        } while (unlikely(read_seqcount_retry(&inode->seq, seq)));
+
+        inode_out = inode_dump(shim_cli, isnap);
+
+        cJSON_AddItemToArray(out, inode_out);
+    }
+
+    free(isnap);
+
+    return out;
 }

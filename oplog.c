@@ -500,3 +500,20 @@ void logger_gc_before_barrier(logger_barrier_t *barrier) {
         WRITE_ONCE(cb->cli->head, cb->tail_snap);
     }
 }
+
+cJSON *logger_dump_log(logger_cli_t *logger_cli, oplog_t log) {
+    uint64_t valp;
+    cJSON *out;
+    k_t key;
+    op_t op;
+
+    op = logger_get(logger_cli, log, &key, &valp);
+
+    out = cJSON_CreateObject();
+
+    cJSON_AddItemToObject(out, "op", cJSON_CreateString(op_str[op]));
+    cJSON_AddItemToObject(out, "key", cJSON_CreateString(k_str(logger_cli->logger->kc, key)));
+    cJSON_AddItemToObject(out, "valp", cJSON_CreateNumber(valp));
+
+    return out;
+}

@@ -244,3 +244,14 @@ void kv_rm_destroy(kv_rm_t *kv_rm) {
     rpma_svr_destroy(kv_rm->svr);
     free(kv_rm);
 }
+
+cJSON *kv_dump(kv_cli_t *kv_cli) {
+    cJSON *out;
+
+    out = cJSON_CreateObject();
+
+    cJSON_AddItemToObject(out, "shim", shim_dump(kv_cli->shim_cli));
+    cJSON_AddItemToObject(out, "dset", dset_dump(kv_cli->dcli));
+
+    return out;
+}

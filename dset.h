@@ -13,6 +13,7 @@
 #ifndef DSET_H
 #define DSET_H
 
+#include <cjson/cJSON.h>
 #include <unistd.h>
 #include <stdint.h>
 
@@ -50,6 +51,8 @@ int dset_lookup(dcli_t *dcli, dgroup_t dgroup, k_t key, uint64_t *valp);
 size_t dset_get_pm_utilization(dcli_t *dcli);
 
 int dset_gc(dcli_t *dcli, size_t *gc_size);
+
+cJSON *dset_dump(dcli_t *dcli);
 
 #ifndef DSET_SOURCE
 static inline bool dgroup_is_eq(dgroup_t a, dgroup_t b) {

@@ -11,6 +11,7 @@
 
 #include "k.h"
 
+#include <cjson/cJSON.h>
 #include <unistd.h>
 #include <stdint.h>
 
@@ -44,5 +45,7 @@ op_t logger_get_within_barrier(logger_barrier_t *barrier, oplog_t log, k_t *key,
 void logger_prefetch_until_barrier(logger_barrier_t *barrier);
 void logger_gc_before_barrier(logger_barrier_t *barrier);
 void logger_destroy_barrier(logger_barrier_t *barrier);
+
+cJSON *logger_dump_log(logger_cli_t *logger_cli, oplog_t log);
 
 #endif // OPLOG_H
