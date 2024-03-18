@@ -1467,7 +1467,7 @@ int rpma_flush(rpma_cli_t *cli, rpma_ptr_t dst, size_t size, rpma_flag_t flag) {
     if (unlikely(IS_ERR(buf))) {
         return PTR_ERR(buf);
     }
-    return rpma_rd(cli, off, flag, buf, 1);
+    return rpma_rd(cli, dst, flag, buf, 1);
 }
 
 int rpma_commit(rpma_cli_t *cli) {
