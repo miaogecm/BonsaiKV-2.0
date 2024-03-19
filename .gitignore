@@ -1,5 +1,5 @@
-# Created by https://www.toptal.com/developers/gitignore/api/cmake,clion,linux,emacs,macos
-# Edit at https://www.toptal.com/developers/gitignore?templates=cmake,clion,linux,emacs,macos
+# Created by https://www.toptal.com/developers/gitignore/api/clion,cmake,emacs,linux,macos,visualstudiocode
+# Edit at https://www.toptal.com/developers/gitignore?templates=clion,cmake,emacs,linux,macos,visualstudiocode
 
 ### CLion ###
 # Covers JetBrains IDEs: IntelliJ, RubyMine, PhpStorm, AppCode, PyCharm, CLion, Android Studio, WebStorm and Rider
@@ -229,4 +229,23 @@ Temporary Items
 # iCloud generated files
 *.icloud
 
-# End of https://www.toptal.com/developers/gitignore/api/cmake,clion,linux,emacs,macos
+### VisualStudioCode ###
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+!.vscode/*.code-snippets
+
+# Local History for Visual Studio Code
+.history/
+
+# Built Visual Studio Code Extensions
+*.vsix
+
+### VisualStudioCode Patch ###
+# Ignore all local history of files
+.history
+.ionide
+
+# End of https://www.toptal.com/developers/gitignore/api/clion,cmake,emacs,linux,macos,visualstudiocode

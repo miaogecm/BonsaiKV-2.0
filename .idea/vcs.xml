@@ -2,6 +2,10 @@
 <project version="4">
   <component name="VcsDirectoryMappings">
     <mapping directory="" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/third_party/blazesym" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/third_party/bpftool" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/third_party/bpftool/libbpf" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/third_party/libbpf" vcs="Git" />
     <mapping directory="$PROJECT_DIR$/third_party/masstree" vcs="Git" />
   </component>
 </project>

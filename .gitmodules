@@ -1,3 +1,12 @@
 [submodule "third_party/masstree"]
 	path = third_party/masstree
 	url = git@github.com:kohler/masstree-beta.git
+[submodule "third_party/libbpf"]
+	path = third_party/libbpf
+	url = https://github.com/libbpf/libbpf.git
+[submodule "third_party/bpftool"]
+	path = third_party/bpftool
+	url = https://github.com/libbpf/bpftool
+[submodule "third_party/blazesym"]
+	path = third_party/blazesym
+	url = https://github.com/libbpf/blazesym.git
