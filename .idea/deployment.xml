@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="PublishConfigData" autoUpload="Always" serverName="Remote Development" remoteFilesAllowedToDisappearOnAutoupload="false" confirmBeforeUploading="false">
+    <option name="confirmBeforeUploading" value="false" />
+    <serverData>
+      <paths name="node0">
+        <serverdata>
+          <mappings>
+            <mapping deploy="/root/BonsaiKV2" local="$PROJECT_DIR$" web="/" />
+          </mappings>
+        </serverdata>
+      </paths>
+      <paths name="node0 (6d835db4-0ea3-449e-b801-1d82abd202f4)">
+        <serverdata>
+          <mappings>
+            <mapping deploy="/tmp/tmp.9TMqcGHMdx" local="$PROJECT_DIR$" />
+          </mappings>
+          <excludedPaths>
+            <excludedPath local="true" path="$PROJECT_DIR$/cmake-build-node0debug" />
+            <excludedPath local="true" path="$PROJECT_DIR$/cmake-build-localdebug" />
+          </excludedPaths>
+        </serverdata>
+      </paths>
+      <paths name="node1">
+        <serverdata>
+          <mappings>
+            <mapping deploy="/root/BonsaiKV2" local="$PROJECT_DIR$" web="/" />
+          </mappings>
+        </serverdata>
+      </paths>
+    </serverData>
+    <option name="myAutoUpload" value="ALWAYS" />
+  </component>
+</project>

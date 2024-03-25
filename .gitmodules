@@ -10,3 +10,6 @@
 [submodule "third_party/blazesym"]
 	path = third_party/blazesym
 	url = https://github.com/libbpf/blazesym.git
+[submodule "third_party/argparse"]
+	path = third_party/argparse
+	url = https://github.com/cofyc/argparse
