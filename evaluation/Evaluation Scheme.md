@@ -40,6 +40,7 @@
 + 2. BonsaiKV-SW striping
 + 3. BonsaiKV-HW striping
 + BW: NVM read BW (MB/s)
++ Throughput: 10Kop/s
 + scan
 
 |      | BW (MB/s) | Throughput | BW   | Throughput | BW   | Throughput |
