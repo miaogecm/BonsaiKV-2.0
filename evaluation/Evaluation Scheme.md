@@ -36,17 +36,18 @@
 #### Evaluating data striping technique
 
 + figure12 (a)
-+ BonsaiKV-no striping
-+ BonsaiKV-SW striping
-+ BonsaiKV-HW striping
++ 1. BonsaiKV-no striping
++ 2. BonsaiKV-SW striping
++ 3. BonsaiKV-HW striping
++ BW: NVM read BW (MB/s)
++ scan
 
-|      | BW   | Throughput | BW   | Throughput | BW   | Throughput |
-| ---- | ---- | ---------- | ---- | ---------- | ---- | ---------- |
-| 1    |      |            |      |            |      |            |
-| 6    |      |            |      |            |      |            |
-| 12   |      |            |      |            |      |            |
-| 18   |      |            |      |            |      |            |
-| 24   |      |            |      |            |      |            |
+|      | BW (MB/s) | Throughput | BW   | Throughput | BW   | Throughput |
+| ---- | --------- | ---------- | ---- | ---------- | ---- | ---------- |
+| 1    | 2573      | 34.8       | 3782 | 42.4       | 5943 | 70.1       |
+| 6    | 3206      | 41.4       | 4004 | 48.7       | 7126 | 95.4       |
+| 12   | 4376      | 48.2       | 4128 | 52.5       | 8027 | 100.2      |
+| 18   | 4998      | 50.1       | 5074 | 59.2       | 9984 | 127.6      |
 
 #### Evaluating coherence protocol overhead
 
