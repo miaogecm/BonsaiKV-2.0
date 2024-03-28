@@ -12,18 +12,30 @@
 + throughput (M op/s)
 + pipelining: 4 coroutines
 
-| thread |       |       |      |
-| ------ | ----- | ----- | ---- |
-| 1      | 1.25  | 1.67  | 0.84 |
-| 6      | 7.49  | 6.82  | 2.41 |
-| 12     | 9.53  | 8.40  | 3.69 |
-| 18     | 12.96 | 10.05 | 4.65 |
-| 24     | 14.57 | 13.22 | 6.04 |
+| thread |       |       |       |      |
+| ------ | ----- | ----- | ----- | ---- |
+| 1      | 2.81  | 1.25  | 1.67  | 0.84 |
+| 6      | 8.27  | 7.49  | 6.82  | 2.41 |
+| 12     | 14.53 | 9.53  | 8.40  | 3.69 |
+| 18     | 16.84 | 12.96 | 10.05 | 4.65 |
+| 24     | 20.22 | 14.57 | 13.22 | 6.04 |
 
 + DRAM
   + same
 
-#### (b) Evaluating Data Offloading technique
+#### (b) Evaluating Pipelining
+
++ 24 threads
+
+|                 | throughput | NVM (GB/s) | IB (Gbps) |
+| --------------- | ---------- | ---------- | --------- |
+| no pipelining   | 6.04       | 0.18       | 1.48      |
+| intra only      | 7.15       | 0.42       | 1.54      |
+| intra + 2 inter | 10.83      | 1.37       | 2.02      |
+| intra + 4 inter | 13.22      | 2.62       | 2.4       |
+| intra + 8 inter | 12.87      | 1.94       | 2.2       |
+
+#### (c) Evaluating Data Offloading technique
 
 + skewed dataset
 + metrics
