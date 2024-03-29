@@ -5,9 +5,6 @@
 ####    (a) Evaluating Indexing Technique
 
 + figure 10
-+ BonsaiKV (DRAM-only, pipelining)
-+ BonsaiKV (data offloading, pipelining)
-+ BonsaiKV (data offloading only)
 
 + throughput (M op/s)
 + pipelining: 4 coroutines
@@ -44,6 +41,7 @@
 
 + BonsaiKV (dnode out-of-place)
 + BonsaiKV (dnode in-place)
++ throughput: Mop/s
 
 | $\alpha$ | Mop/s | WRR % | Mop/s | WRR % |
 | -------- | ----- | ----- | ----- | ----- |
@@ -68,8 +66,9 @@
 + BW: NVM read BW (MB/s)
 + Throughput: 10Kop/s
 + scan
++ N: total number of network requests
 
-|      | BW (MB/s) | Throughput |        | BW   | Throughput |         | BW   | Throughput |        |
+|      | BW (MB/s) | Throughput | N      | BW   | Throughput | N       | BW   | Throughput | N      |
 | ---- | --------- | ---------- | ------ | ---- | ---------- | ------- | ---- | ---------- | ------ |
 | 1    | 2573      | 34.8       | 5884   | 3782 | 42.4       | 184992  | 5943 | 70.1       | 11885  |
 | 6    | 3206      | 41.4       | 32069  | 4004 | 48.7       | 1068045 | 7126 | 95.4       | 73898  |
