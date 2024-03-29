@@ -89,6 +89,7 @@
   + C: BonsaiKV-HW striping
 + setup:
   + 1 thread
+  + scan for 20ms
 
 
 + dataset:
