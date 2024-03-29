@@ -4,10 +4,14 @@
 
 ####    (a) Evaluating Indexing Technique
 
-+ figure 10
++ example: figure 10
 
-+ throughput (M op/s)
-+ pipelining: 4 coroutines
++ metrics: throughput (M op/s)
++ setup:
+  + pipelining: use 4 coroutines (optimal)
++ dataset:
+  + YCSB-C (read-only)
+  + 0.3GB data
 
 | thread | DRAM-only, pipelining | data offloading + metadata uploading + pipelining | data offloading + pipelining | data offloading only |
 | ------ | --------------------- | ------------------------------------------------- | ---------------------------- | -------------------- |
@@ -17,12 +21,20 @@
 | 18     | 16.84                 | 15.03                                             | 10.05                        | 4.65                 |
 | 24     | 20.22                 | 19.17                                             | 13.22                        | 6.04                 |
 
-+ DRAM
-  + same
++ DRAM consomption
+  + same as VLDB paper
 
 #### (b) Evaluating Pipelining
 
-+ 24 threads
++ metrics: 
+  + throughput (Mop/s)
+  + NVM BW (GB/s)
+  + IB BW (Gbps)
++ setup:
+  + 24 threads
++ dataset:
+  + YCSB-C (read only)
+  + 0.3GB data
 
 |                 | throughput | NVM (GB/s) | IB (Gbps) |
 | --------------- | ---------- | ---------- | --------- |
@@ -34,39 +46,54 @@
 
 #### (c) Evaluating Data Offloading technique
 
-+ skewed dataset
-+ metrics
-  + data offloading throughput
++ setup:
+  + 1 thread
+
++ metrics:
+  + data offloading throughput (Mop/s)
   + write reduction rate
++ dataset:
+  + YCSB-update-only
+  + skewed dataset (zipf dist)
+  + 0.3GB data
 
-+ BonsaiKV (dnode out-of-place)
-+ BonsaiKV (dnode in-place)
-+ throughput: Mop/s
++ comparison:
+  + A: BonsaiKV (bnode in-place merge + dnode out-of-place update)
+  + B: BonsaiKV (dnode in-place update, naive solution)
 
-| $\alpha$ | Mop/s | WRR % | Mop/s | WRR % |
-| -------- | ----- | ----- | ----- | ----- |
-| uni      | 12.32 | 0     | 2.23  | 0     |
-| 0.90     | 19.45 | 43    | 2.38  | 0     |
-| 0.99     | 24.33 | 64    | 2.42  | 0     |
-| 1.20     | 25.72 | 82    | 2.37  | 0     |
-| 1.50     | 26.16 | 93    | 2.41  | 0     |
+| $\alpha$ | A: Mop/s | A: WRR % | B: Mop/s | B: WRR % |
+| -------- | -------- | -------- | -------- | -------- |
+| uni      | 12.32    | 0        | 2.23     | 0        |
+| 0.90     | 19.45    | 43       | 2.38     | 0        |
+| 0.99     | 24.33    | 64       | 2.42     | 0        |
+| 1.20     | 25.72    | 82       | 2.37     | 0        |
+| 1.50     | 26.16    | 93       | 2.41     | 0        |
 
 ## Persistence tier
 
-+ same
++ same as VLDB paper
 
 ## Scalability tier
 
 #### Evaluating data striping technique
 
-+ figure12 (a)
-+ 1. BonsaiKV-no striping
-+ 2. BonsaiKV-SW striping
-+ 3. BonsaiKV-HW striping
-+ BW: NVM read BW (MB/s)
-+ Throughput: 10Kop/s
-+ scan
-+ N: total number of network requests
++ metrics:
+  + NVM read bandwidth (MB/s)
+  + throughput (10kop/s)
+  + number of network reqs
+
++ example: figure12 (a)
++ comparison:
+  + A: BonsaiKV-no striping
+  + B: BonsaiKV-SW striping
+  + C: BonsaiKV-HW striping
++ setup:
+  + 1 thread
+
+
++ dataset:
+  + YCSB-E (scan-only)
+  + 0.3GB data
 
 |      | BW (MB/s) | Throughput | N      | BW   | Throughput | N       | BW   | Throughput | N      |
 | ---- | --------- | ---------- | ------ | ---- | ---------- | ------- | ---- | ---------- | ------ |
@@ -77,9 +104,7 @@
 
 #### Evaluating coherence protocol overhead
 
-+ figure12 (b)
-
-
++ same as figure12 (b) in VLDB paper
 
 ## Synthesis Benchmark
 
