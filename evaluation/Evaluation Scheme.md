@@ -88,7 +88,6 @@
   + B: BonsaiKV-SW striping
   + C: BonsaiKV-HW striping
 + setup:
-  + 1 thread
   + scan for 20ms
     + start from the first dnode
 
