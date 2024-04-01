@@ -112,12 +112,81 @@
 #### KVs
 
 + BonsaiKV
-+ Clover
++ Dinomo
+  + client+KN+RN+MN: node0
+  + DPM: node1
+
+
 + pactree + infiniswap
 + Sherman (+ persistence)
+
+```
+./benchmark kNodeCount kReadRatio kThreadCount # run sherman benchmark
+```
 
 #### Benchmarks
 
 + integer KV / string KV
-+ YCSB Load/A/B/C/D/E
++ YCSB Load/A/C/D/E
++ A: 50% read, 50% write
++ C: 100% read
++ D: 95% read, 5% write
++ E: 95% scan, 5% write
+
+#### YCSB
+
+##### YCSB-Load-Int
+
+| NThreads | Sherman | PACTree + Infiniswap | DINOMO | BonsaiKV |
+| -------- | ------- | -------------------- | ------ | -------- |
+| 6        | 0.83    |                      |        |          |
+| 12       | 1.24    |                      |        |          |
+| 18       | 2.02    |                      |        |          |
+| 24       | 2.94    |                      |        |          |
+| 30       | 3.55    |                      |        |          |
+| 36       | 4.30    |                      |        |          |
+
+##### YCSB-A-Int
+
+| NThreads | Sherman | PACTree + Infiniswap | DINOMO | BonsaiKV |
+| -------- | ------- | -------------------- | ------ | -------- |
+| 6        | 1.44    |                      |        |          |
+| 12       | 2.18    |                      |        |          |
+| 18       | 3.17    |                      |        |          |
+| 24       | 4.18    |                      |        |          |
+| 30       | 5.04    |                      |        |          |
+| 36       | 5.73    |                      |        |          |
+
+##### YCSB-C-Int
+
+| NThreads | Sherman | PACTree + Infiniswap | DINOMO | BonsaiKV |
+| -------- | ------- | -------------------- | ------ | -------- |
+| 6        | 1.97    |                      |        |          |
+| 12       | 4.02    |                      |        |          |
+| 18       | 5.31    |                      |        |          |
+| 24       | 6.24    |                      |        |          |
+| 30       | 8.32    |                      |        |          |
+| 36       | 8.95    |                      |        |          |
+
+##### YCSB-D-Int
+
+| NThreads | Sherman | PACTree + Infiniswap | DINOMO | BonsaiKV |
+| -------- | ------- | -------------------- | ------ | -------- |
+| 6        | 1.70    |                      |        |          |
+| 12       | 2.84    |                      |        |          |
+| 18       | 4.47    |                      |        |          |
+| 24       | 5.96    |                      |        |          |
+| 30       | 7.45    |                      |        |          |
+| 36       | 7.96    |                      |        |          |
+
+##### YCSB-E-Int
+
+| NThreads | Sherman | PACTree + Infiniswap | DINOMO | BonsaiKV |
+| -------- | ------- | -------------------- | ------ | -------- |
+| 6        | 0.12    |                      |        |          |
+| 12       | 0.38    |                      |        |          |
+| 18       | 0.33    |                      |        |          |
+| 24       | 0.45    |                      |        |          |
+| 30       | 0.57    |                      |        |          |
+| 36       | 0.62    |                      |        |          |
 
