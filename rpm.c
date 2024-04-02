@@ -66,6 +66,7 @@
 
 #define _GNU_SOURCE
 
+#include <stdint.h>
 #include <infiniband/mlx5dv.h>
 #include <rdma/rdma_cma.h>
 #include <arpa/inet.h>
@@ -87,14 +88,17 @@
 #define MAX_SEND_SGE    32
 #define MAX_RECV_SGE    32
 
-#define MAX_INLINE_DATA    64
+#define MAX_INLINE_DATA    512
 
 #define RETRY_CNT   14
+#define RNR_RETRY_CNT   14
 
 #define MAX_CLI_NR_MRS  8
 
 #define OP_BUF_SIZE     (1 * 1024 * 1024ul)
 #define CLI_BUF_SIZE    (1 * 1024 * 1024ul)
+
+#define MAX_OUTSTANDING_RD_ATOM     16
 
 static unsigned epoch;
 
@@ -145,6 +149,16 @@ struct spair {
     size_t skip;
 };
 
+struct svr_dom {
+    struct pm_dev *devs;
+    int id;
+
+    in_addr_t ip;
+    in_port_t port;
+
+    struct cm *cm;
+};
+
 struct rpma_svr {
     int nr_doms, nr_devs_per_dom;
 
@@ -158,14 +172,13 @@ struct rpma_svr {
     struct svr_dom doms[];
 };
 
-struct svr_dom {
-    struct pm_dev *devs;
+struct cm_dom {
     int id;
-
-    in_addr_t ip;
-    in_port_t port;
-
     struct cm *cm;
+    struct svr_dom *dom;
+    struct ibv_mr **base_mrs;
+    /* per-client temporary variable */
+    uint32_t lkey, rkey;
 };
 
 struct cm {
@@ -179,18 +192,10 @@ struct cm {
     bool exit;
 
     /* per-client temporary variable */
+    struct ibv_qp *qp;
     uint32_t rep_rkey;
 
     struct cm_dom doms[];
-};
-
-struct cm_dom {
-    int id;
-    struct cm *cm;
-    struct svr_dom *dom;
-    struct ibv_mr **base_mrs;
-    /* per-client temporary variable */
-    uint32_t lkey, rkey;
 };
 
 /*
@@ -207,7 +212,7 @@ struct segment_info {
  * Domain cache directory saves information about each segment
  */
 struct dom_dir {
-    struct segment_info seginfos[];
+    struct segment_info seginfos[0];
 };
 
 struct cli_dom {
@@ -231,6 +236,9 @@ struct rpma {
 
 struct rpma_cli {
     rpma_t *rpma;
+
+    struct rdma_event_channel *cm_chan;
+    struct rdma_cm_id *cli_id;
 
     struct ibv_pd *pd;
 
@@ -273,15 +281,31 @@ static inline struct ibv_qp *create_qp(struct cm *cm, struct rdma_cm_id *cli_id)
     struct ibv_qp_init_attr_ex init_attr_ex;
     struct ibv_qp *qp;
 
+    /* create send_cq if necessary */
+    if (unlikely(!cli_id->send_cq)) {
+        cli_id->send_cq = ibv_create_cq(context, MAX_QP_SR, NULL, NULL, 0);
+        if (unlikely(!cli_id->send_cq)) {
+            qp = ERR_PTR(-errno);
+            goto out;
+        }
+    }
+
+    /* create recv_cq if necessary */
+    if (unlikely(!cli_id->recv_cq)) {
+        cli_id->recv_cq = ibv_create_cq(context, MAX_QP_RR, NULL, NULL, 0);
+        if (unlikely(!cli_id->recv_cq)) {
+            qp = ERR_PTR(-errno);
+            goto out;
+        }
+    }
+
     /* configure QP init attrs */
     memset(&mlx5_qp_attr, 0, sizeof(mlx5_qp_attr));
     memset(&init_attr_ex, 0, sizeof(init_attr_ex));
 
     /* enable QP support for interleaved MR */
-    if (cm->svr->nr_devs_per_dom > 1) {
-        mlx5_qp_attr.comp_mask |= MLX5DV_QP_INIT_ATTR_MASK_SEND_OPS_FLAGS;
-        mlx5_qp_attr.send_ops_flags |= MLX5DV_QP_EX_WITH_MR_INTERLEAVED;
-    }
+    mlx5_qp_attr.comp_mask |= MLX5DV_QP_INIT_ATTR_MASK_SEND_OPS_FLAGS;
+    mlx5_qp_attr.send_ops_flags |= MLX5DV_QP_EX_WITH_MKEY_CONFIGURE;
 
     /* configure common QP init attrs */
     init_attr_ex.send_cq = cli_id->send_cq;
@@ -294,15 +318,17 @@ static inline struct ibv_qp *create_qp(struct cm *cm, struct rdma_cm_id *cli_id)
     init_attr_ex.qp_type = IBV_QPT_RC;
     init_attr_ex.pd = cli_id->pd;
     init_attr_ex.send_ops_flags |= IBV_QP_EX_WITH_RDMA_WRITE | IBV_QP_EX_WITH_RDMA_READ | IBV_QP_EX_WITH_SEND;
-    init_attr_ex.send_ops_flags |= IBV_QP_EX_WITH_RDMA_WRITE_WITH_IMM | IBV_QP_EX_WITH_SEND_WITH_IMM;
+    init_attr_ex.send_ops_flags |= IBV_QP_EX_WITH_LOCAL_INV;
     init_attr_ex.comp_mask = IBV_QP_INIT_ATTR_PD | IBV_QP_INIT_ATTR_SEND_OPS_FLAGS;
 
     /* create QP */
     qp = mlx5dv_create_qp(context, &init_attr_ex, &mlx5_qp_attr);
     if (unlikely(!qp)) {
+        pr_err("failed to create QP: %s", strerror(errno));
         qp = ERR_PTR(-errno);
     }
 
+out:
     return qp;
 }
 
@@ -319,7 +345,8 @@ static inline int create_base_mrs(struct cm_dom *dom, struct rdma_cm_id *cli_id)
         goto out;
     }
 
-    flags = IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_READ | IBV_ACCESS_REMOTE_WRITE | IBV_ACCESS_REMOTE_ATOMIC;
+    flags = IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_READ | IBV_ACCESS_REMOTE_WRITE | \
+            IBV_ACCESS_REMOTE_ATOMIC;
 
     for (i = 0; i < dom->cm->svr->nr_devs_per_dom; i++) {
         start = dom->dom->devs[i].start;
@@ -331,6 +358,8 @@ static inline int create_base_mrs(struct cm_dom *dom, struct rdma_cm_id *cli_id)
             pr_err("failed to register MR: %s", strerror(-ret));
             goto out;
         }
+
+        pr_debug(10, "created base MR (rkey=%u) for pd %p", dom->base_mrs[i]->rkey, cli_id->pd);
     }
 
 out:
@@ -345,12 +374,13 @@ static inline int create_replicated_mr(struct cm *cm, struct rdma_cm_id *cli_id)
     rpma_svr_t *svr = cm->svr;
     struct ibv_qp_ex *qpx;
     size_t repeat_count;
+    struct ibv_wc wc;
     int i, ret = 0;
     int flags;
 
     /* get qp */
-    bonsai_assert(cli_id->qp);
-    qpx = ibv_qp_to_qp_ex(cli_id->qp);
+    bonsai_assert(cm->qp);
+    qpx = ibv_qp_to_qp_ex(cm->qp);
     dv_qp = mlx5dv_qp_ex_from_ibv_qp_ex(qpx);
 
     /* configure mkey init attr */
@@ -360,6 +390,11 @@ static inline int create_replicated_mr(struct cm *cm, struct rdma_cm_id *cli_id)
 
     /* create mkey */
     dv_mkey = mlx5dv_create_mkey(&mkey_init_attr);
+    if (unlikely(!dv_mkey)) {
+        ret = -errno;
+        pr_err("failed to create dv_mkey: %s", strerror(-ret));
+        goto out;
+    }
 
     /* init segments info */
     seg_info = calloc(svr->nr_doms, sizeof(*seg_info));
@@ -379,13 +414,25 @@ static inline int create_replicated_mr(struct cm *cm, struct rdma_cm_id *cli_id)
 
     /* configure interleaved MR */
     ibv_wr_start(qpx);
-    mlx5dv_wr_mr_interleaved(dv_qp, dv_mkey, flags, repeat_count, svr->nr_devs_per_dom, seg_info);
+    qpx->wr_id = 0;
+    qpx->wr_flags = IBV_SEND_INLINE | IBV_SEND_SIGNALED;
+    mlx5dv_wr_mr_interleaved(dv_qp, dv_mkey, flags, repeat_count, svr->nr_doms, seg_info);
     ret = ibv_wr_complete(qpx);
     if (unlikely(ret)) {
-        ret = -errno;
         pr_err("failed to complete interleaved MR: %s", strerror(-ret));
         goto out;
     }
+
+    /* wait for completion */
+    do {
+        ret = ibv_poll_cq(cli_id->send_cq, 1, &wc);
+        if (unlikely(ret < 0)) {
+            pr_err("failed to poll CQ: %s", strerror(errno));
+            goto out;
+        }
+    } while (ret < 1);
+    bonsai_assert(wc.opcode == IBV_WC_DRIVER1);
+    ret = 0;
 
     cm->rep_rkey = dv_mkey->rkey;
 
@@ -394,6 +441,7 @@ out:
 }
 
 static inline int create_striped_mr(struct cm_dom *dom, struct rdma_cm_id *cli_id) {
+    struct mlx5dv_mkey_conf_attr conf_attr = { };
     struct mlx5dv_mkey_init_attr mkey_init_attr;
     struct mlx5dv_mr_interleaved *strips;
     rpma_svr_t *svr = dom->cm->svr;
@@ -402,12 +450,13 @@ static inline int create_striped_mr(struct cm_dom *dom, struct rdma_cm_id *cli_i
     struct ibv_qp_ex *qpx;
     struct spair *spair;
     size_t repeat_count;
+    struct ibv_wc wc;
     int i, ret = 0;
     int flags;
 
     /* get qp */
-    bonsai_assert(cli_id->qp);
-    qpx = ibv_qp_to_qp_ex(cli_id->qp);
+    bonsai_assert(dom->cm->qp);
+    qpx = ibv_qp_to_qp_ex(dom->cm->qp);
     dv_qp = mlx5dv_qp_ex_from_ibv_qp_ex(qpx);
 
     /* if no PM MRs, create them */
@@ -418,23 +467,21 @@ static inline int create_striped_mr(struct cm_dom *dom, struct rdma_cm_id *cli_i
         }
     }
 
-    /* if only one device, no interleaving (indirect mkey) required */
-    if (svr->nr_devs_per_dom == 1) {
-        dom->lkey = dom->base_mrs[0]->lkey;
-        dom->rkey = dom->base_mrs[0]->rkey;
-        goto out;
-    }
-
     /* configure mkey init attr */
     mkey_init_attr.create_flags = MLX5DV_MKEY_INIT_ATTR_FLAGS_INDIRECT;
-    mkey_init_attr.max_entries = svr->nr_devs_per_dom;
+    mkey_init_attr.max_entries = svr->nr_spairs;
     mkey_init_attr.pd = cli_id->pd;
 
     /* create mkey */
     dv_mkey = mlx5dv_create_mkey(&mkey_init_attr);
+    if (unlikely(!dv_mkey)) {
+        ret = -errno;
+        pr_err("failed to create dv_mkey: %s", strerror(-ret));
+        goto out;
+    }
 
     /* generate strips info with permutation array */
-    strips = calloc(svr->nr_devs_per_dom, sizeof(*strips));
+    strips = calloc(svr->nr_spairs, sizeof(*strips));
     if (unlikely(!strips)) {
         ret = -ENOMEM;
         pr_err("failed to allocate memory for MR strips: %s", strerror(-ret));
@@ -442,27 +489,95 @@ static inline int create_striped_mr(struct cm_dom *dom, struct rdma_cm_id *cli_i
     }
     for (i = 0; i < svr->nr_spairs; i++) {
         spair = &svr->spairs[i];
-        strips[i].addr = (uintptr_t) dom->base_mrs[spair->dev]->addr;
+        strips[i].addr = (uintptr_t) dom->dom->devs[spair->dev].start + spair->off;
         strips[i].bytes_count = spair->count;
         strips[i].bytes_skip = spair->skip;
-        strips[i].lkey = dom->base_mrs[i]->lkey;
+        strips[i].lkey = dom->base_mrs[spair->dev]->lkey;
         bonsai_assert(spair->count == svr->strip_size);
+
+        pr_debug(20, "strip %d: addr=%lx, count=%u, skip=%u, lkey=%u", i,
+                 strips[i].addr, strips[i].bytes_count, strips[i].bytes_skip, strips[i].lkey);
     }
     repeat_count = svr->logical_size / (svr->nr_spairs * svr->strip_size);
-    flags = IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_READ | IBV_ACCESS_REMOTE_WRITE | IBV_ACCESS_REMOTE_ATOMIC;
+    flags = IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_READ | IBV_ACCESS_REMOTE_WRITE;
 
     /* configure interleaved MR */
     ibv_wr_start(qpx);
-    mlx5dv_wr_mr_interleaved(dv_qp, dv_mkey, flags, repeat_count, svr->nr_devs_per_dom, strips);
+    qpx->wr_id = 0;
+    qpx->wr_flags = IBV_SEND_INLINE | IBV_SEND_SIGNALED;
+    mlx5dv_wr_mkey_configure(dv_qp, dv_mkey, 2, &conf_attr);
+    mlx5dv_wr_set_mkey_access_flags(dv_qp, flags);
+    mlx5dv_wr_set_mkey_layout_interleaved(dv_qp, repeat_count, svr->nr_spairs, strips);
     ret = ibv_wr_complete(qpx);
     if (unlikely(ret)) {
-        ret = -errno;
         pr_err("failed to complete interleaved MR: %s", strerror(-ret));
         goto out;
     }
 
+    /* wait for completion */
+    do {
+        ret = ibv_poll_cq(cli_id->send_cq, 1, &wc);
+        if (unlikely(ret < 0)) {
+            pr_err("failed to poll CQ: %s", strerror(errno));
+            goto out;
+        }
+    } while (ret < 1);
+    bonsai_assert(wc.opcode == IBV_WC_DRIVER1);
+    ret = 0;
+
     dom->lkey = dv_mkey->lkey;
     dom->rkey = dv_mkey->rkey;
+
+out_succ:
+    pr_debug(10, "striped MR created, lkey=%u, rkey=%u", dom->lkey, dom->rkey);
+
+out:
+    return ret;
+}
+
+static int do_modify_qp(struct ibv_qp *qp, struct rdma_cm_id *cm_id, enum ibv_qp_state state) {
+    struct ibv_qp_attr attr = { };
+    int attr_mask;
+    int ret;
+
+    attr.qp_state = state;
+
+    ret = rdma_init_qp_attr(cm_id, &attr, &attr_mask);
+    if (unlikely(ret)) {
+        ret = -errno;
+        pr_err("failed to init QP attr: %s", strerror(errno));
+        goto out;
+    }
+
+    ret = ibv_modify_qp(qp, &attr, attr_mask);
+    if (unlikely(ret)) {
+        ret = -ret;
+        pr_err("failed to modify QP to %d: %s", state, strerror(-ret));
+    }
+
+out:
+    return ret;
+}
+
+static int modify_qp(struct ibv_qp *qp, struct rdma_cm_id *cm_id) {
+    int ret;
+
+    ret = do_modify_qp(qp, cm_id, IBV_QPS_INIT);
+    if (unlikely(ret)) {
+        pr_err("failed to modify QP to INIT: %s", strerror(-ret));
+        goto out;
+    }
+
+    ret = do_modify_qp(qp, cm_id, IBV_QPS_RTR);
+    if (unlikely(ret)) {
+        pr_err("failed to modify QP to RTR: %s", strerror(-ret));
+        goto out;
+    }
+
+    ret = do_modify_qp(qp, cm_id, IBV_QPS_RTS);
+    if (unlikely(ret)) {
+        pr_err("failed to modify QP to RTS: %s", strerror(-ret));
+    }
 
 out:
     return ret;
@@ -472,13 +587,15 @@ static inline int handle_event_connect_request(struct cm *cm, struct rdma_cm_id 
     struct rdma_conn_param conn_param = { };
     rpma_svr_t *svr = cm->svr;
     struct pdata *pdata;
+    size_t pdata_size;
     struct ibv_qp *qp;
-    uint32_t rkey;
     int ret, i;
 
     pr_debug(10, "start handle event connect request");
 
-    pdata = calloc(1, sizeof(*pdata) + cm->svr->nr_doms * sizeof(uint32_t));
+    pdata_size = sizeof(*pdata) + cm->svr->nr_doms * sizeof(uint32_t);
+
+    pdata = calloc(1, pdata_size);
     if (unlikely(!pdata)) {
         ret = -ENOMEM;
         pr_err("failed to allocate memory for pdata: %s", strerror(-ret));
@@ -491,7 +608,13 @@ static inline int handle_event_connect_request(struct cm *cm, struct rdma_cm_id 
         ret = PTR_ERR(qp);
         goto out;
     }
-    cli_id->qp = qp;
+    cm->qp = qp;
+
+    /* modify qp */
+    ret = modify_qp(qp, cli_id);
+    if (unlikely(ret)) {
+        goto out;
+    }
 
     /* create intra-domain striped memory region via indirect mkey */
     for (i = 0; i < cm->svr->nr_doms; i++) {
@@ -518,17 +641,25 @@ static inline int handle_event_connect_request(struct cm *cm, struct rdma_cm_id 
     for (i = 0; i < svr->nr_doms; i++) {
         pdata->dommr_keys[i] = cm->doms[i].rkey;
     }
-    conn_param.private_data = &pdata;
-    conn_param.private_data_len = sizeof(pdata);
+
+    /* setup connection parameters */
+    conn_param.initiator_depth = MAX_OUTSTANDING_RD_ATOM;
+    conn_param.responder_resources = MAX_OUTSTANDING_RD_ATOM;
+    conn_param.retry_count = RETRY_CNT;
+    conn_param.rnr_retry_count = RNR_RETRY_CNT;
+    conn_param.qp_num = qp->qp_num;
+    conn_param.private_data = pdata;
+    conn_param.private_data_len = pdata_size;
 
     /* accept connection */
     ret = rdma_accept(cli_id, &conn_param);
     if (unlikely(ret)) {
+        ret = -errno;
         pr_err("failed to accept RDMA connection: %s", strerror(errno));
         goto out;
     }
 
-    pr_debug(10, "connection accepted, rkey=%u, qp=%u", rkey, qp->qp_num);
+    pr_debug(10, "connection accepted, qp=%u", qp->qp_num);
 
     free(pdata);
 
@@ -538,11 +669,24 @@ out:
 
 static inline int handle_event_established(rpma_svr_t *svr, struct rdma_cm_id *cli_id) {
     pr_debug(10, "handle event established");
+    return 0;
+}
+
+static inline int handle_event_disconnected(rpma_svr_t *svr, struct rdma_cm_id *cli_id) {
+    pr_debug(10, "handle event disconnected");
+    return 0;
 }
 
 static inline int parse_ip_port(const char *s, in_addr_t *ip_addr, in_port_t *port) {
     char *p;
     int ret;
+
+    s = strdup(s);
+    if (unlikely(!s)) {
+        ret = -ENOMEM;
+        pr_err("failed to allocate memory for IP:PORT string: %s", strerror(-ret));
+        goto out;
+    }
 
     p = strchr(s, ':');
     if (unlikely(!p)) {
@@ -559,7 +703,7 @@ static inline int parse_ip_port(const char *s, in_addr_t *ip_addr, in_port_t *po
         goto out;
     }
 
-    *port = atoi(p + 1);
+    *port = htons(atoi(p + 1));
     if (unlikely(*port <= 0 || *port > 65535)) {
         ret = -EINVAL;
         pr_err("invalid port number: %s", p + 1);
@@ -567,6 +711,8 @@ static inline int parse_ip_port(const char *s, in_addr_t *ip_addr, in_port_t *po
     }
 
     ret = 0;
+
+    free(s);
 
 out:
     return ret;
@@ -583,7 +729,7 @@ static void *cm_entry(void *arg) {
     struct cm *cm = arg;
     int ret;
 
-    cm->tid = gettid();
+    cm->tid = syscall(SYS_gettid);
 
     cm_chan = rdma_create_event_channel();
     if (unlikely(!cm_chan)) {
@@ -600,7 +746,7 @@ static void *cm_entry(void *arg) {
     }
 
     sin.sin_family = AF_INET;
-    sin.sin_port = htons(cm->local_dom->port);
+    sin.sin_port = cm->local_dom->port;
     sin.sin_addr.s_addr = cm->local_dom->ip;
 
     ret = rdma_bind_addr(svr_id, (struct sockaddr *) &sin);
@@ -626,12 +772,6 @@ static void *cm_entry(void *arg) {
             pr_err("failed to get RDMA CM event: %s", strerror(errno));
             goto out_destroy_id;
         }
-        ret = rdma_ack_cm_event(event);
-        if (ret) {
-            ret = -errno;
-            pr_err("failed to acknowledge RDMA CM event: %s", strerror(errno));
-            goto out_destroy_id;
-        }
 
         cli_id = event->id;
 
@@ -644,6 +784,10 @@ static void *cm_entry(void *arg) {
                 ret = handle_event_established(cm, cli_id);
                 break;
 
+            case RDMA_CM_EVENT_DISCONNECTED:
+                ret = handle_event_disconnected(cm, cli_id);
+                break;
+
             default:
                 ret = -EINVAL;
                 pr_err("unexpected RPMA CM event: %d", event->event);
@@ -651,6 +795,13 @@ static void *cm_entry(void *arg) {
 
         if (unlikely(ret)) {
             pr_err("failed to accept RDMA connection: %s", strerror(-ret));
+            goto out_destroy_id;
+        }
+
+        ret = rdma_ack_cm_event(event);
+        if (ret) {
+            ret = -errno;
+            pr_err("failed to acknowledge RDMA CM event: %s", strerror(errno));
             goto out_destroy_id;
         }
     }
@@ -693,8 +844,11 @@ static inline int convert_permute_into_spairs(rpma_svr_t *svr, const int *permut
     for (i = 0; i < svr->nr_spairs; i++) {
         spairs[i].dev = permutes[i];
         spairs[i].off = get_nr_occur(permutes, i, permutes[i]) * svr->strip_size;
-        spairs[i].skip = get_nr_occur(permutes + i, nr_permutes - i, permutes[i]) * svr->strip_size;
+        spairs[i].skip = get_nr_occur(permutes + i + 1, svr->nr_spairs - i - 1, permutes[i]) * svr->strip_size;
         spairs[i].count = svr->strip_size;
+
+        pr_debug(10, "spair[%d]: dev=%d, off=%lu, count=%lu, skip=%lu",
+                 i, spairs[i].dev, spairs[i].off, spairs[i].count, spairs[i].skip);
     }
 
     svr->spairs = spairs;
@@ -720,7 +874,7 @@ static void dump_topology(rpma_svr_t *svr) {
         for (j = 0; j < svr->nr_devs_per_dom; j++) {
             dev = &dom->devs[j];
 
-            pr_debug(5, "\t\tdevice %s", dev->path);
+            pr_debug(5, "\t\tdevice %s", dev->name);
             pr_debug(5, "\t\t\tstart: %p", dev->start);
             pr_debug(5, "\t\t\tsize: %lu", dev->size);
             pr_debug(5, "\t\t\tsocket: %d", dev->socket);
@@ -744,10 +898,15 @@ rpma_svr_t *rpma_svr_create(rpma_conf_t *rpma_conf) {
         goto out;
     }
 
+    svr->nr_doms = rpma_conf->nr_doms;
+    svr->nr_devs_per_dom = rpma_conf->nr_dev_per_dom;
+
     /* init domains */
     for (i = 0; i < rpma_conf->nr_doms; i++) {
         dom = &svr->doms[i];
         dom_conf = &rpma_conf->dom_confs[i];
+
+        dom->id = i;
 
         /* open PM devices */
         dom->devs = pm_open_devs(rpma_conf->nr_dev_per_dom, dom_conf->dev_paths);
@@ -768,7 +927,7 @@ rpma_svr_t *rpma_svr_create(rpma_conf_t *rpma_conf) {
     }
 
     /* calculate striping and replication info */
-    svr->strip_size = rpma_conf->nr_dev_per_dom > 1 ? rpma_conf->strip_size : 0;
+    svr->strip_size = rpma_conf->strip_size;
     svr->stripe_size = svr->strip_size * rpma_conf->nr_dev_per_dom;
     svr->logical_size = 0;
     dom = &svr->doms[0];
@@ -937,7 +1096,7 @@ rpma_t *rpma_create(const char *host, const char *dev_ip, int interval_us) {
 
     rpma->host = host;
     rpma->dev_ip = dev_ip;
-    register_epoch_timer(interval_us);
+    //register_epoch_timer(interval_us);
 
     /* TODO: init dirs */
 
@@ -951,8 +1110,8 @@ void rpma_destroy(rpma_t *rpma) {
 
 rpma_cli_t *rpma_cli_create(rpma_t *rpma) {
     struct rdma_conn_param conn_param = { };
+    struct ibv_qp_init_attr_ex init_attr;
     struct rdma_event_channel *cm_chan;
-    struct ibv_qp_init_attr init_attr;
     struct rdma_cm_event *event;
     struct sockaddr_in sin;
     struct rdma_cm_id *id;
@@ -980,7 +1139,11 @@ rpma_cli_t *rpma_cli_create(rpma_t *rpma) {
     if (unlikely(ret)) {
         cli = ERR_PTR(-errno);
         pr_err("failed to create RDMA listen ID: %s", strerror(errno));
+        goto out;
     }
+
+    cli->cm_chan = cm_chan;
+    cli->cli_id = id;
 
     memset(&sin, 0, sizeof(sin));
     sin.sin_family = AF_INET;
@@ -1050,15 +1213,21 @@ rpma_cli_t *rpma_cli_create(rpma_t *rpma) {
     init_attr.send_cq = id->send_cq;
     init_attr.recv_cq = id->recv_cq;
     init_attr.qp_type = IBV_QPT_RC;
-    ret = rdma_create_qp(id, id->pd, &init_attr);
+    init_attr.pd = id->pd;
+    init_attr.send_ops_flags |= IBV_QP_EX_WITH_RDMA_WRITE | IBV_QP_EX_WITH_RDMA_READ | IBV_QP_EX_WITH_SEND;
+    init_attr.send_ops_flags |= IBV_QP_EX_WITH_LOCAL_INV;
+    init_attr.comp_mask = IBV_QP_INIT_ATTR_PD | IBV_QP_INIT_ATTR_SEND_OPS_FLAGS;
+    ret = rdma_create_qp_ex(id, &init_attr);
     if (unlikely(ret)) {
         cli = ERR_PTR(-errno);
         pr_err("failed to create RDMA QP: %s", strerror(errno));
         goto out_destroy_id;
     }
 
-    conn_param.initiator_depth = 1;
+    conn_param.initiator_depth = MAX_OUTSTANDING_RD_ATOM;
+    conn_param.responder_resources = MAX_OUTSTANDING_RD_ATOM;
     conn_param.retry_count = RETRY_CNT;
+    conn_param.rnr_retry_count = RNR_RETRY_CNT;
     ret = rdma_connect(id, &conn_param);
     if (unlikely(ret)) {
         cli = ERR_PTR(-errno);
@@ -1103,7 +1272,7 @@ rpma_cli_t *rpma_cli_create(rpma_t *rpma) {
         goto out_destroy_id;
     }
     for (i = 0; i < cli->nr_doms; i++) {
-        cli->doms[i].dir = rpma->dirs[i];
+        //cli->doms[i].dir = rpma->dirs[i];
         cli->doms[i].id = i;
         cli->doms[i].mr_key = pdata->dommr_keys[i];
     }
@@ -1143,13 +1312,12 @@ rpma_cli_t *rpma_cli_create(rpma_t *rpma) {
     pr_debug(10, "rpma [%s] -> %s size=%lu,qpn=%d)",
              rpma->dev_ip, rpma->host, cli->logical_size, cli->qp->qp_num);
 
+out:
+    return cli;
+
 out_destroy_id:
     rdma_destroy_id(id);
-
-out_destroy_channel:
     rdma_destroy_event_channel(cm_chan);
-
-out:
     return cli;
 }
 
@@ -1265,7 +1433,7 @@ static inline struct ibv_sge *get_sg_list(rpma_cli_t *cli, rpma_buf_t *buf, int 
     bonsai_assert(!buf[cnt].size);
     *nr = cnt;
 
-    sglist = calloc(cnt, sizeof(*sglist));
+    sglist = calloc(cnt, sizeof(*sglist) * cnt);
     if (unlikely(!sglist)) {
         goto out;
     }
@@ -1301,11 +1469,13 @@ int rpma_wr_(rpma_cli_t *cli, rpma_ptr_t dst, rpma_buf_t src[], rpma_flag_t flag
     int ret = 0, num_sge;
     struct ibv_sge *sgl;
 
+#if 0
     if (unlikely(dst.off >= cli->logical_size)) {
         ret = -EINVAL;
         pr_err("invalid destination offset: %lu", dst.off);
         goto out;
     }
+#endif
 
     sgl = get_sg_list(cli, src, &num_sge, false);
     if (unlikely(IS_ERR(sgl))) {
@@ -1328,6 +1498,8 @@ int rpma_wr_(rpma_cli_t *cli, rpma_ptr_t dst, rpma_buf_t src[], rpma_flag_t flag
     wr->num_sge = num_sge;
     wr->wr.rdma.remote_addr = dst.off;
     wr->wr.rdma.rkey = cli->doms[dst.home].mr_key;
+
+    pr_info("off: %lu, size: %u, rkey: %u", dst.off, sgl->length, wr->wr.rdma.rkey);
 
     insert_into_wr_list(cli, wr);
 
@@ -1426,11 +1598,6 @@ int rpma_rd_(rpma_cli_t *cli, rpma_buf_t dst[], rpma_ptr_t src, rpma_flag_t flag
     if (unlikely(src.off >= cli->logical_size)) {
         ret = -EINVAL;
         pr_err("invalid source offset: %lu", src);
-        goto out;
-    }
-
-    if (!dst[1].start && dst[0].size == cli->segment_size && src.off % cli->segment_size == 0) {
-        ret = rd_segment_fastpath(cli, dst[0].start, src, flag);
         goto out;
     }
 

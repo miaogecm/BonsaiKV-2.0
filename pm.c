@@ -6,6 +6,7 @@
  * Hohai University
  */
 
+#include <ndctl/libdaxctl.h>
 #include <ndctl/libndctl.h>
 #include <sys/stat.h>
 #include <sys/mman.h>
@@ -19,11 +20,14 @@
 	        ndctl_region_foreach(bus, region)			        \
         	ndctl_namespace_foreach(region, ndns)
 
-static int get_device_socket(const char *path) {
+static int get_device_info(const char *name, char *path, size_t *size, int *socket) {
+    struct daxctl_region *dax_region;
     struct ndctl_namespace *ndns;
     struct ndctl_region *region;
+    struct daxctl_dev *dax_dev;
     struct ndctl_bus *bus;
     struct ndctl_ctx *ctx;
+    struct ndctl_dax *dax;
     int ret;
 
     ret = ndctl_new(&ctx);
@@ -32,12 +36,27 @@ static int get_device_socket(const char *path) {
         goto out;
     }
 
+    ret = -ENONET;
+
     FOREACH_BUS_REGION_NAMESPACE(ctx, bus, region, ndns) {
-        if (strcmp(ndctl_namespace_get_devname(ndns), path) != 0) {
+        if (strcmp(ndctl_namespace_get_alt_name(ndns), name) != 0) {
             continue;
         }
 
-        ret = ndctl_namespace_get_numa_node(ndns);
+        dax = ndctl_namespace_get_dax(ndns);
+        dax_region = ndctl_dax_get_daxctl_region(dax);
+        dax_dev = daxctl_dev_get_first(dax_region);
+        if (unlikely(!dax_dev)) {
+            pr_err("failed to get PM device %s", name);
+            goto out;
+        }
+        sprintf(path, "/dev/%s", daxctl_dev_get_devname(dax_dev));
+
+        *size = daxctl_dev_get_size(dax_dev);
+
+        *socket = ndctl_namespace_get_numa_node(ndns);
+
+        ret = 0;
         break;
     }
 
@@ -46,21 +65,13 @@ out:
     return ret;
 }
 
-static int open_dev(struct pm_dev *dev, const char *path) {
-    struct stat sbuf;
-    int ret = 0;
+static int open_dev(struct pm_dev *dev, const char *name) {
+    char path[256];
+    int ret;
 
-    if (unlikely(stat(path, &sbuf))) {
-        ret = -errno;
-        pr_err("failed to stat PM device %s: %s", path, strerror(-ret));
-        goto out;
-    }
-    dev->size = sbuf.st_size;
-
-    dev->socket = get_device_socket(path);
-    if (unlikely(dev->socket < 0)) {
-        ret = dev->socket;
-        pr_err("failed to get PM device socket %s: %s", path, strerror(-ret));
+    ret = get_device_info(name, path, &dev->size, &dev->socket);
+    if (unlikely(ret)) {
+        pr_err("failed to get PM device info %s: %s", name, strerror(-ret));
         goto out;
     }
 
@@ -71,14 +82,16 @@ static int open_dev(struct pm_dev *dev, const char *path) {
         goto out;
     }
 
-    dev->start = mmap(NULL, sbuf.st_size, PROT_READ | PROT_WRITE, MAP_SHARED, dev->fd, 0);
+    dev->start = mmap(NULL, dev->size, PROT_READ | PROT_WRITE, MAP_SHARED, dev->fd, 0);
     if (unlikely(dev->start == MAP_FAILED)) {
         ret = -errno;
         pr_err("failed to mmap PM device %s: %s", path, strerror(-ret));
     }
 
-    pr_debug(10, "open PM device path=%s, size=%.2fMB, socket=%d, fd=%d, start=%p",
-             path, (double) sbuf.st_size / (1 << 20), dev->socket, dev->fd, dev->start);
+    dev->name = name;
+
+    pr_debug(10, "open PM device name=%s path=%s, size=%.2fMB, socket=%d, fd=%d, start=%p",
+             name, path, (double) dev->size / (1 << 20), dev->socket, dev->fd, dev->start);
 
 out:
     return ret;
@@ -93,7 +106,7 @@ static void close_dev(struct pm_dev *dev) {
     }
 }
 
-struct pm_dev *pm_open_devs(int nr_devs, const char *dev_paths[]) {
+struct pm_dev *pm_open_devs(int nr_devs, const char *dev_names[]) {
     struct pm_dev *devs;
     int i, ret;
 
@@ -105,11 +118,11 @@ struct pm_dev *pm_open_devs(int nr_devs, const char *dev_paths[]) {
     }
 
     for (i = 0; i < nr_devs; i++) {
-        ret = open_dev(&devs[i], dev_paths[i]);
+        ret = open_dev(&devs[i], dev_names[i]);
         if (unlikely(ret)) {
             free(devs);
             devs = ERR_PTR(ret);
-            pr_err("failed to open PM device %s: %s", dev_paths[i], strerror(-ret));
+            pr_err("failed to open PM device %s: %s", dev_names[i], strerror(-ret));
             goto out;
         }
     }

@@ -9,6 +9,8 @@
 #ifndef KV_H
 #define KV_H
 
+#include <cjson/cJSON.h>
+
 #include "config.h"
 
 typedef struct kv kv_t;

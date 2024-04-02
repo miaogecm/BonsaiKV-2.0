@@ -104,6 +104,13 @@ out:
     return shim;
 }
 
+void shim_destroy(shim_t *shim) {
+    free(shim->sentinel);
+    free(shim);
+
+    pr_debug(5, "shim destroyed");
+}
+
 shim_cli_t *shim_create_cli(shim_t *shim, logger_cli_t *logger_cli) {
     shim_cli_t *shim_cli;
 

@@ -3,29 +3,67 @@
   <component name="PublishConfigData" autoUpload="Always" serverName="Remote Development" remoteFilesAllowedToDisappearOnAutoupload="false" confirmBeforeUploading="false">
     <option name="confirmBeforeUploading" value="false" />
     <serverData>
-      <paths name="node0">
+      <paths name="node0 (46000938-892f-4a9b-a086-8eb1ac55669f)">
         <serverdata>
           <mappings>
-            <mapping deploy="/root/BonsaiKV2" local="$PROJECT_DIR$" web="/" />
+            <mapping deploy="/root/BonsaiKV2" local="$PROJECT_DIR$" />
           </mappings>
+          <excludedPaths>
+            <excludedPath local="true" path="$PROJECT_DIR$/cmake-build-node0debug" />
+            <excludedPath local="true" path="$PROJECT_DIR$/cmake-build-node141debug" />
+            <excludedPath local="true" path="$PROJECT_DIR$/cmake-build-node1debug" />
+            <excludedPath local="true" path="$PROJECT_DIR$/cmake-build-localdebug" />
+          </excludedPaths>
         </serverdata>
       </paths>
       <paths name="node0 (6d835db4-0ea3-449e-b801-1d82abd202f4)">
         <serverdata>
           <mappings>
-            <mapping deploy="/tmp/tmp.9TMqcGHMdx" local="$PROJECT_DIR$" />
+            <mapping deploy="/root/BonsaiKV2" local="$PROJECT_DIR$" web="/" />
           </mappings>
           <excludedPaths>
             <excludedPath local="true" path="$PROJECT_DIR$/cmake-build-node0debug" />
+            <excludedPath local="true" path="$PROJECT_DIR$/cmake-build-node1debug" />
             <excludedPath local="true" path="$PROJECT_DIR$/cmake-build-localdebug" />
           </excludedPaths>
         </serverdata>
       </paths>
-      <paths name="node1">
+      <paths name="node1 (aeed8b75-658e-40fb-95cd-a2f8375c7786)">
+        <serverdata>
+          <mappings>
+            <mapping deploy="/root/BonsaiKV2" local="$PROJECT_DIR$" />
+          </mappings>
+          <excludedPaths>
+            <excludedPath local="true" path="$PROJECT_DIR$/cmake-build-node0debug" />
+            <excludedPath local="true" path="$PROJECT_DIR$/cmake-build-node141debug" />
+            <excludedPath local="true" path="$PROJECT_DIR$/cmake-build-node1debug" />
+            <excludedPath local="true" path="$PROJECT_DIR$/cmake-build-localdebug" />
+          </excludedPaths>
+        </serverdata>
+      </paths>
+      <paths name="node1 (b3e1637b-f816-44bb-a720-da32955364cc)">
         <serverdata>
           <mappings>
             <mapping deploy="/root/BonsaiKV2" local="$PROJECT_DIR$" web="/" />
           </mappings>
+          <excludedPaths>
+            <excludedPath local="true" path="$PROJECT_DIR$/cmake-build-node0debug" />
+            <excludedPath local="true" path="$PROJECT_DIR$/cmake-build-node1debug" />
+            <excludedPath local="true" path="$PROJECT_DIR$/cmake-build-localdebug" />
+          </excludedPaths>
+        </serverdata>
+      </paths>
+      <paths name="node141 (37d6e221-47e4-45ba-9d44-21df8f3f65f0)">
+        <serverdata>
+          <mappings>
+            <mapping deploy="/root/BonsaiKV2" local="$PROJECT_DIR$" />
+          </mappings>
+          <excludedPaths>
+            <excludedPath local="true" path="$PROJECT_DIR$/cmake-build-node0debug" />
+            <excludedPath local="true" path="$PROJECT_DIR$/cmake-build-node141debug" />
+            <excludedPath local="true" path="$PROJECT_DIR$/cmake-build-node1debug" />
+            <excludedPath local="true" path="$PROJECT_DIR$/cmake-build-localdebug" />
+          </excludedPaths>
         </serverdata>
       </paths>
     </serverData>

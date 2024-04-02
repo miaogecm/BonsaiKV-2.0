@@ -9,8 +9,7 @@
 #define UTILS_NO_PREFETCH
 
 #include "masstree/config.h"
-#include "masstree/compiler.hh"
-#include "masstree/kvthread.hh"
+#include "masstree/compiler.cc"
 #include "masstree/masstree.hh"
 #include "masstree/masstree_insert.hh"
 #include "masstree/masstree_print.hh"
@@ -24,8 +23,15 @@
 #include "masstree/straccum.cc"
 #include "masstree/kvthread.cc"
 
+extern "C" {
+
 #include "utils.h"
 #include "k.h"
+
+}
+
+relaxed_atomic<mrcu_epoch_type> globalepoch = { 1 };
+relaxed_atomic<mrcu_epoch_type> active_epoch = { 1 };
 
 typedef void index_t;
 

@@ -9,6 +9,9 @@
 #ifndef CONFIG_H
 #define CONFIG_H
 
+#include <stdbool.h>
+#include <stddef.h>
+
 #include "k.h"
 
 struct rpma_conf;
@@ -18,9 +21,6 @@ typedef struct kv_cli_conf kv_cli_conf_t;
 typedef struct kv_rm_conf kv_rm_conf_t;
 
 struct kv_conf {
-    /* asok */
-    const char *asok_sock_path;
-
     /* key class */
     kc_t *kc;
 

@@ -9,6 +9,10 @@
 #ifndef K_H
 #define K_H
 
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+
 typedef struct kc kc_t;
 typedef struct k k_t;
 
