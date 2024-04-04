@@ -152,6 +152,12 @@
   + pactree + aifm: 1 (inner node hot, cached in DRAM)
   + dinomo: 5 (client -> RN -> KN -> DM (twice))
   + BonsaiKV: 0
++ IO size: (disadvantages of sherman and pactree)
+
+  + sherman: 1024
+  + PACTree + AIFM: 1232
+  + DINIMO: 40
+  + BonsaiKV: 0
 
 ##### YCSB-A-Int
 
