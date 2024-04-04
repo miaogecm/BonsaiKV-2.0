@@ -151,7 +151,7 @@
   + sherman: 1 (inner node cached in DRAM, only one access to remote node)
   + pactree + aifm: 1 (inner node hot, cached in DRAM)
   + dinomo: 5 (client -> RN -> KN -> DM (twice))
-  + BonsaiKV: 1
+  + BonsaiKV: 0
 
 ##### YCSB-A-Int
 
@@ -211,13 +211,13 @@
 
 | NThreads | Sherman | PACTree + AIFM | DINOMO | BonsaiKV | BonsaiKV - SP |
 | -------- | ------- | -------------- | ------ | -------- | ------------- |
-| 1        |         |                |        | 0.05     | same          |
+| 1        | 0.13    |                |        | 0.05     | same          |
 | 6        |         |                |        | 0.42     | as            |
 | 12       |         |                |        | 0.79     | before        |
 | 18       |         |                |        | 0.85     |               |
-| 24       |         |                |        | 0.89     |               |
-| 30       |         |                |        | 0.97     |               |
-| 36       |         |                |        | 1.21     |               |
+| 24       | 0.96    |                |        | 0.89     |               |
+| 30       | 0.79    |                |        | 0.97     |               |
+| 36       | 0.94    |                |        | 1.21     |               |
 
 ##### YCSB-A-String
 
