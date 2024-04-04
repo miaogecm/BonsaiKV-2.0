@@ -137,15 +137,21 @@
 
 ##### YCSB-Load-Int
 
-| NThreads | Sherman | PACTree + AIFM | DINOMO | BonsaiKV |
-| -------- | ------- | -------------- | ------ | -------- |
-| 1        | 0.59    | 0.28           | 0.25   | 2.04     |
-| 6        | 0.83    | 0.62           | 0.62   | 9.83     |
-| 12       | 1.24    | 1.08           | 1.13   | 12.23    |
-| 18       | 2.02    | 2.13           | 1.25   | 19.84    |
-| 24       | 2.94    | 2.56           | 1.78   | 25.06    |
-| 30       | 3.55    | 2.98           | 1.98   | 28.43    |
-| 36       | 4.30    | 3.27           | 2.35   | 30.02    |
+| NThreads | Sherman |      | PACTree + AIFM |      | DINOMO |      | BonsaiKV |      |
+| -------- | ------- | ---- | -------------- | ---- | ------ | ---- | -------- | ---- |
+| 1        | 0.59    |      | 0.28           |      | 0.25   |      | 2.04     |      |
+| 6        | 0.83    |      | 0.62           |      | 0.62   |      | 9.83     |      |
+| 12       | 1.24    |      | 1.08           |      | 1.13   |      | 12.23    |      |
+| 18       | 2.02    |      | 2.13           |      | 1.25   |      | 19.84    |      |
+| 24       | 2.94    |      | 2.56           |      | 1.78   |      | 25.06    |      |
+| 30       | 3.55    |      | 2.98           |      | 1.98   |      | 28.43    |      |
+| 36       | 4.30    |      | 3.27           |      | 2.35   |      | 30.02    |      |
+
++ number of round trips
+  + sherman: 1 (inner node cached in DRAM, only one access to remote node)
+  + pactree + aifm: 1 (inner node hot, cached in DRAM)
+  + dinomo: 5 (client -> RN -> KN -> DM (twice))
+  + BonsaiKV: 1
 
 ##### YCSB-A-Int
 
@@ -170,6 +176,12 @@
 | 24       | 6.24    | 5.95           | 1.82   | 13.09    |
 | 30       | 8.32    | 7.01           | 2.23   | 14.73    |
 | 36       | 8.95    | 7.47           | 2.60   | 15.02    |
+
++ IO size: (disadvantages of sherman and pactree)
+  + sherman: 1024
+  + PACTree + AIFM: 1232
+  + DINIMO: 72
+  + BonsaiKV: 16
 
 ##### YCSB-D-Int
 
