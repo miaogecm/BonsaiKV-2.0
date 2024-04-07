@@ -1,5 +1,21 @@
 # Evaluation Scheme
 
+## Motivation
+
+### Channel-Level Parallelism
+
++ repeatedly access a single 8KB node
++ 24 threads
+
+| strip size | bandwidth |
+| ---------- | --------- |
+| 256        | 10128     |
+| 512        | 10080     |
+| 1024       | 9912      |
+| 2048       | 8280      |
+| 4096       | 7488      |
+| 8192       | 6624      |
+
 ## Index tier
 
 ####    (a) Evaluating Indexing Technique
