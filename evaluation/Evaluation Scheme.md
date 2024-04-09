@@ -2,19 +2,34 @@
 
 ## Motivation
 
-### Channel-Level Parallelism
+### CLP: Latency
 
-+ repeatedly access a single 8KB node
++ NVM lat measure: use ipmctl_total_read_requests_total to approximate
+
+| thread | Total (1 DIMM) | NVM lat (1 DIMM) | 2     | 2     | 3     | 3     |
+| ------ | -------------- | ---------------- | ----- | ----- | ----- | ----- |
+| 4      | 4.98           | 4.32             | 4.64  | 4.02  | 4.44  | 3.82  |
+| 8      | 9.84           | 8.72             | 7.82  | 7.03  | 5.92  | 4.83  |
+| 16     | 20.34          | 18.84            | 15.93 | 14.78 | 11.43 | 9.66  |
+| 24     | 32.83          | 30.23            | 24.84 | 22.24 | 17.54 | 14.49 |
+
+### CLP: BW
+
 + 24 threads
++ 200Gbps network
++ Net: use mellanox hardware counter (rx_read_requests)
++ PCIe: use pcm-iio
++ NVM: use pcm-memory
++ bottleneck shifts from NVM to network
 
-| strip size | read bandwidth (MB/s) |
-| ---------- | --------------------- |
-| 256        | 10128                 |
-| 512        | 10080                 |
-| 1024       | 9912                  |
-| 2048       | 8280                  |
-| 4096       | 7488                  |
-| 8192       | 6624                  |
+| n DIMMs    | Net (25GB/s) | PCIe (32GB/s) | NVM         |
+| ---------- | ------------ | ------------- | ----------- |
+| 1 (6GB/s)  | 5266 (21%)   | 5551 (17%)    | 5857 (97%)  |
+| 2 (12GB/s) | 10820 (43%)  | 10093 (30%)   | 11384 (94%) |
+| 3 (18GB/s) | 17082 (67%)  | 17204 (52%)   | 17485 (97%) |
+| 4 (24GB/s) | 23704 (97%)  | 23872 (72%)   | 23928 (99%) |
+| 5 (30GB/s) | 24094 (97%)  | 24107 (73%)   | 24242 (80%) |
+| 6 (36GB/s) | 24108 (97%)  | 24290 (73%)   | 24307 (67%) |
 
 ## Index tier
 
