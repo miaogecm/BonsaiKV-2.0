@@ -8,7 +8,7 @@ This repository contains the source code, setup utilities, and test scripts of B
 
 BonsaiKV+ has been tested and evaluated on a hardware platform with two RDMA-connected commodity server machines. Detailed hardware and software configurations are follows:
 
-**CPU:** Intel Xeon Gold 6240M @ 2.60GHZ
+**CPU:** 2 x Intel Xeon Gold 6240M @ 2.60GHZ
 
 **NVM:** 12 x 128GB Intel Optane DC Persistent Memory
 
@@ -16,7 +16,7 @@ BonsaiKV+ has been tested and evaluated on a hardware platform with two RDMA-con
 
 **SSD:** 1 TB Samsung solid state driver
 
-**NIC:** Mellanox ConnectX-5 NIC
+**NIC:** 2 x Mellanox ConnectX-5 NIC
 
 **Network:** InfiniBand
 
